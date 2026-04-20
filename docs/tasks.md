@@ -26,10 +26,10 @@
 | X-001 | 初始化仓库与 README、架构文档 | ✅ | — | commit `b082259` |
 | X-002 | 文档全部中文化 + CLAUDE.md 规则 | ✅ | X-001 | commit `7668bab` |
 | X-003 | 架构 v2:补齐平台服务层 | ✅ | X-002 | commit `4154a90` |
-| X-004 | 创建本任务清单 | 🟡 | X-003 | 当前 commit |
-| X-005 | 选定技术栈并写入 ADR(Python 版本、包管理、Lint、测试框架) | ⬜ | X-004 | ADR 放 `docs/adr/` |
+| X-004 | 创建本任务清单 | ✅ | X-003 | commit `0056ffa` |
+| X-005 | 选定技术栈并写入 ADR(Python 版本、包管理、Lint、测试框架) | ✅ | X-004 | `docs/adr/0001-tech-stack.md` |
 | X-006 | CI/CD 雏形(GitHub Actions:lint + test) | ⬜ | X-005 | |
-| X-007 | LICENSE 选定(MIT / Apache-2.0 / 商业许可) | ⬜ | — | README 当前为"待定" |
+| X-007 | LICENSE 选定(MIT / Apache-2.0 / 商业许可) | ✅ | — | Apache-2.0 |
 | X-008 | 安全审查流程(secrets scanning、依赖扫描) | ⬜ | X-006 | |
 
 ---
@@ -40,9 +40,9 @@
 
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
-| P0-001 | `pyproject.toml` + 包目录结构 | ⬜ | X-005 | 推荐 `uv` / `poetry` |
-| P0-002 | 安装 `openai-agents` SDK,跑通最小 hello-world agent | ⬜ | P0-001 | |
-| P0-003 | 配置 `OPENAI_API_KEY` 加载与本地 `.env.example` | ⬜ | P0-001 | |
+| P0-001 | `pyproject.toml` + 包目录结构 | ✅ | X-005 | `uv` + `src/` layout |
+| P0-002 | 安装 `openai-agents` SDK,跑通最小 hello-world agent | ✅ | P0-001 | `src/auto_marketing_agent/agents/hello.py`,代码就位,待装依赖后执行 |
+| P0-003 | 配置 `OPENAI_API_KEY` 加载与本地 `.env.example` | ✅ | P0-001 | `pydantic-settings` + `.env.example` |
 | P0-004 | Tracing 接入与本地查看(SDK 自带) | ⬜ | P0-002 | |
 
 ### Schema Registry(P0 必备)
@@ -262,11 +262,11 @@
 
 | 阶段 | 总任务数 | 已完成 |
 |------|---------|--------|
-| 跨阶段 | 8 | 3 |
-| P0 | 22 | 0 |
+| 跨阶段 | 8 | 6 |
+| P0 | 22 | 3 |
 | P1 | 18 | 0 |
 | P2 | 21 | 0 |
 | P3 | 18 | 0 |
-| **合计** | **87** | **3** |
+| **合计** | **87** | **9** |
 
 > 完成数随 commit 同步更新。

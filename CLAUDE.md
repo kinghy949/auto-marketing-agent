@@ -18,9 +18,32 @@
 
 ## 仓库当前状态
 
-设计阶段。**尚无运行时代码、依赖清单、构建脚本或测试套件**。仓库目前只有架构文档。**不要凭空编造 build / lint / test 命令** —— 在代码落地之前这些命令都不存在。
+P0 骨架阶段。`pyproject.toml` + `src/` 布局 + 最小 hello-world agent 已就位,业务 agent(Audience / Creative / Orchestrator / ...)尚未实现,schema 与平台服务层尚未落地。
 
-第一份代码应建立项目骨架(例如 `pyproject.toml`、包结构、最小 agent runner)。骨架就位后,请同步更新本文件,补上真实命令。
+技术栈决策见 [`docs/adr/0001-tech-stack.md`](docs/adr/0001-tech-stack.md);任务追踪见 [`docs/tasks.md`](docs/tasks.md)。
+
+### 常用命令
+
+使用 `uv`(推荐):
+
+```bash
+uv sync --all-extras            # 安装运行时 + dev 依赖
+uv run ruff check .             # lint
+uv run ruff format .            # 格式化
+uv run mypy src tests           # 类型检查(strict)
+uv run pytest                   # 单元测试
+uv run auto-marketing-agent hello  # 跑 hello 烟雾测试(需 OPENAI_API_KEY)
+```
+
+不装 `uv` 的回退路径:
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e '.[dev]'
+ruff check . && ruff format . && mypy src tests && pytest
+```
+
+运行前把 `.env.example` 复制为 `.env` 并填 `OPENAI_API_KEY`。
 
 ## 设计文档位置
 

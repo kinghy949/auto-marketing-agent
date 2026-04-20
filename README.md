@@ -27,4 +27,4 @@
 
 ## License
 
-待定
+[Apache License 2.0](LICENSE)

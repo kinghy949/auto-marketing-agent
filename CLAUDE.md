@@ -31,14 +31,28 @@
 
 ## 已敲定的架构约束
 
-以下是**决策**,不是建议。代码落地时应遵守:
+以下是**决策**,不是建议。代码落地时应遵守。详见 `docs/architecture.md` (v2)。
 
+**Agent 层:**
 - **基于 OpenAI Agents SDK** (`openai-agents`)。多 agent 编排使用该 SDK 的原语(Agents、Sandbox Agents、Tools、Handoffs、Sessions、Tracing),不要自造框架。
 - **事件驱动 handoff,而非线性流水线**。Attribution agent 可在 ROAS 下滑时主动 handoff 回 Creative agent。
-- **每个 Campaign 一个 Session**,生命周期约 4–6 周。
-- **长任务必须放进 Sandbox Agent**(ffmpeg/PIL 媒体处理、MMM 模型拟合),不要在 orchestrator 主循环里跑。
-- **Human-in-the-loop 精确插点,不是兜底审批**:仅当单日预算变化 > 30% 或涉及新品类/敏感词时强制人工。不要"为了保险"在其他地方加审批步骤,那会破坏自治目标。
+- **每个 Campaign 一个 Session**,生命周期约 4–6 周。跨 campaign 的知识走 Knowledge Store,不要塞 Session。
+- **长任务必须放进 Sandbox Agent**(ffmpeg/PIL 媒体处理、MMM 模型拟合)。Sandbox 内只能拿 scoped credentials。
 - **MMM 是必备,不是可选**。iOS 14 之后 MTA 不可信,不要把点击归因当作 ground truth 来设计。
+
+**平台服务层(一等公民,不是附属):**
+- **Schema Registry**:所有 handoff payload 用 Pydantic 强类型,集中版本化。反序列化失败 → DLQ,不要降级为 dict 直接传递。
+- **Cost Guard**:三层 token 预算(单调用 / 单 campaign 单日 / 平台层 daily cap)。每次 LLM 调用前必须过 Cost Guard。
+- **Circuit Breaker 独立于 HITL**:HITL 是事前审批,Breaker 是事后熔断。两者都要,不可互相替代。
+- **Event Store**:每个 agent decision 写一条 append-only event,支持重放与审计。不要直接修改状态,要走 event。
+- **Secrets 必须 scoped**:Sandbox / Media Buyer 拿到的凭证必须是最小权限子集,不要用 full-access token。
+- **Data Layer 必须做 freshness check**:Attribution 拿到滞后 > 6h 的数据时必须降级或拒绝出报告,联动 Circuit Breaker。
+
+**HITL 边界:**
+- 仅当单日预算变化 > 30%、涉及新品类/敏感词、或 Circuit Breaker 触发后 resume 时强制人工。不要"为了保险"在其他地方加审批,会破坏自治目标。
+
+**部署:**
+- MVP 阶段单租户独立部署(每客户独立 namespace + DB + Vault path)。客户数 > 20 之前不要做共享多租户。
 
 ## Commit 规范
 

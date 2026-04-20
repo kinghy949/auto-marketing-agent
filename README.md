@@ -1,30 +1,30 @@
 # auto-marketing-agent
 
-Autonomous marketing campaign orchestration built on the [OpenAI Agents SDK](https://github.com/openai/openai-agents-python).
+基于 [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) 构建的**自主营销活动编排系统**。
 
-Humans set KPI / budget / brand guardrails. A team of specialized agents handles audience segmentation, creative generation, media buying, experimentation, attribution, and compliance — running 24/7.
+人类只设定 KPI、预算和品牌红线。一组专业化 agent 协同完成受众分群、创意生成、媒介投放、实验设计、归因分析和合规审查 —— 7 × 24 小时自主运行。
 
-## Status
+## 当前状态
 
-Early design phase. Architecture is documented in [`docs/architecture.md`](docs/architecture.md). No runtime code yet.
+早期设计阶段。架构详见 [`docs/architecture.md`](docs/architecture.md)。**尚无运行时代码**。
 
-## Target Users
+## 目标用户
 
-- DTC e-commerce brands
-- Mobile game publishers
-- B2B SaaS growth teams
+- DTC 电商品牌
+- 手游发行商
+- B2B SaaS 增长团队
 
-Sweet spot: monthly ad spend $50K – $500K (too small isn't worth automating; too large already has internal teams).
+最佳契合区间:**月广告预算 $50K – $500K**。预算太小不值得自动化,太大已有内部团队。
 
-## Roadmap
+## MVP 路线图
 
-| Phase | Scope | Risk |
-|-------|-------|------|
-| P0 — Copilot | Generate creative + recommend audiences. Human runs the buys. | None |
-| P1 — Semi-auto | Auto buying, all creative human-reviewed. | Low |
-| P2 — Autonomous (small budget) | Closed-loop under $500/day. | Medium |
-| P3 — Scale | Multi-vertical, multi-market, multi-platform. | Needs full eval pipeline. |
+| 阶段 | 范围 | 风险 |
+|------|------|------|
+| P0 — Copilot | 生成创意 + 推荐受众,投放仍由人完成 | 几乎为零 |
+| P1 — 半自动 | 自动投放,所有创意需人审 | 低 |
+| P2 — 小预算自治 | 单日 < $500 全自动闭环 | 中 |
+| P3 — 规模化 | 多品类、多市场、多平台并发 | 需完整 eval 体系 |
 
 ## License
 
-TBD
+待定

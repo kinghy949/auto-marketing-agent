@@ -18,7 +18,14 @@
 
 ## 仓库当前状态
 
-P0 骨架阶段。`pyproject.toml` + `src/` 布局 + 最小 hello-world agent 已就位,业务 agent(Audience / Creative / Orchestrator / ...)尚未实现,schema 与平台服务层尚未落地。
+P0 进行中。骨架(`pyproject.toml` + `src/` + hello-world agent)与部分平台服务层已就位:
+
+- **Schema Registry**(`src/auto_marketing_agent/schemas/`):7 条 v1 Pydantic schema + `registry.py` 查表
+- **Secrets 抽象 + scoped view**(`src/auto_marketing_agent/secrets/`):env 后端 + 审计接口,设计文档见 `docs/scoped-credentials.md`
+- **Tracing 封装**(`src/auto_marketing_agent/tracing.py`):`campaign_trace` 固定 SDK `group_id = campaign_id`
+- **CI/CD**(`.github/workflows/`):ci(ruff + mypy + pytest)+ security(gitleaks + pip-audit)
+
+业务 agent(Audience / Creative / Orchestrator / Media Buyer / Attribution / Experiment / Guardrail)尚未实现。其它平台组件(Cost Guard、Event Store、Circuit Breaker、Data Layer、Knowledge Store)待 P1+。
 
 技术栈决策见 [`docs/adr/0001-tech-stack.md`](docs/adr/0001-tech-stack.md);任务追踪见 [`docs/tasks.md`](docs/tasks.md)。
 

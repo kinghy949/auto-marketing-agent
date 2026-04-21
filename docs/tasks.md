@@ -28,9 +28,9 @@
 | X-003 | 架构 v2:补齐平台服务层 | ✅ | X-002 | commit `4154a90` |
 | X-004 | 创建本任务清单 | ✅ | X-003 | commit `0056ffa` |
 | X-005 | 选定技术栈并写入 ADR(Python 版本、包管理、Lint、测试框架) | ✅ | X-004 | `docs/adr/0001-tech-stack.md` |
-| X-006 | CI/CD 雏形(GitHub Actions:lint + test) | ⬜ | X-005 | |
+| X-006 | CI/CD 雏形(GitHub Actions:lint + test) | ✅ | X-005 | `.github/workflows/ci.yml` |
 | X-007 | LICENSE 选定(MIT / Apache-2.0 / 商业许可) | ✅ | — | Apache-2.0 |
-| X-008 | 安全审查流程(secrets scanning、依赖扫描) | ⬜ | X-006 | |
+| X-008 | 安全审查流程(secrets scanning、依赖扫描) | ✅ | X-006 | `.github/workflows/security.yml`(gitleaks + pip-audit) |
 
 ---
 
@@ -43,28 +43,28 @@
 | P0-001 | `pyproject.toml` + 包目录结构 | ✅ | X-005 | `uv` + `src/` layout |
 | P0-002 | 安装 `openai-agents` SDK,跑通最小 hello-world agent | ✅ | P0-001 | `src/auto_marketing_agent/agents/hello.py`,代码就位,待装依赖后执行 |
 | P0-003 | 配置 `OPENAI_API_KEY` 加载与本地 `.env.example` | ✅ | P0-001 | `pydantic-settings` + `.env.example` |
-| P0-004 | Tracing 接入与本地查看(SDK 自带) | ⬜ | P0-002 | |
+| P0-004 | Tracing 接入与本地查看(SDK 自带) | ✅ | P0-002 | `src/auto_marketing_agent/tracing.py`(`campaign_trace` 封装 + `AMA_TRACING_DISABLED`) |
 
 ### Schema Registry(P0 必备)
 
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
-| P0-010 | 定义 `CampaignPlan` Pydantic schema | ⬜ | P0-001 | Orchestrator 输出 |
-| P0-011 | 定义 `AudienceSegment` schema | ⬜ | P0-001 | |
-| P0-012 | 定义 `CreativeVariant` schema | ⬜ | P0-001 | |
-| P0-013 | 定义 `BuyOrder` schema(含 idempotency key 字段) | ⬜ | P0-001 | |
-| P0-014 | 定义 `ExperimentSpec` / `StopRule` schema | ⬜ | P0-001 | |
-| P0-015 | 定义 `AttributionReport` schema | ⬜ | P0-001 | |
-| P0-016 | 定义 `ApprovalDecision` schema | ⬜ | P0-001 | |
-| P0-017 | Schema 版本化机制(目录 / 版本号约定) | ⬜ | P0-010..016 | |
+| P0-010 | 定义 `CampaignPlan` Pydantic schema | ✅ | P0-001 | `schemas/v1/campaign.py` |
+| P0-011 | 定义 `AudienceSegment` schema | ✅ | P0-001 | `schemas/v1/audience.py`,仅允许 hashed IDs |
+| P0-012 | 定义 `CreativeVariant` schema | ✅ | P0-001 | `schemas/v1/creative.py`,含 AssetRights |
+| P0-013 | 定义 `BuyOrder` schema(含 idempotency key 字段) | ✅ | P0-001 | `schemas/v1/buy_order.py` |
+| P0-014 | 定义 `ExperimentSpec` / `StopRule` schema | ✅ | P0-001 | `schemas/v1/experiment.py`,含 traffic_share 合法性 |
+| P0-015 | 定义 `AttributionReport` schema | ✅ | P0-001 | `schemas/v1/attribution.py`,含 freshness SLO 联动 |
+| P0-016 | 定义 `ApprovalDecision` schema | ✅ | P0-001 | `schemas/v1/approval.py`,reject 必带 violations |
+| P0-017 | Schema 版本化机制(目录 / 版本号约定) | ✅ | P0-010..016 | `schemas/v<N>/` 目录 + `registry.py` 查表 |
 
 ### Secrets Manager(P0 必备)
 
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
-| P0-020 | Secrets 抽象接口(支持 env / Vault / AWS SM) | ⬜ | P0-001 | MVP 用 env,接口预留 |
+| P0-020 | Secrets 抽象接口(支持 env / Vault / AWS SM) | ✅ | P0-001 | `src/auto_marketing_agent/secrets/`,env 后端 + 审计接口 |
 | P0-021 | OAuth 流程:Meta Ads | ⬜ | P0-020 | refresh token 持久化 |
-| P0-022 | Scoped credentials 设计文档 | ⬜ | P0-020 | 影响后续 Sandbox |
+| P0-022 | Scoped credentials 设计文档 | ✅ | P0-020 | `docs/scoped-credentials.md` |
 
 ### Agent MVP(只做 Copilot 必需的两个)
 
@@ -262,11 +262,11 @@
 
 | 阶段 | 总任务数 | 已完成 |
 |------|---------|--------|
-| 跨阶段 | 8 | 6 |
-| P0 | 22 | 3 |
+| 跨阶段 | 8 | 8 |
+| P0 | 22 | 13 |
 | P1 | 18 | 0 |
 | P2 | 21 | 0 |
 | P3 | 18 | 0 |
-| **合计** | **87** | **9** |
+| **合计** | **87** | **21** |
 
 > 完成数随 commit 同步更新。

@@ -1,0 +1,24 @@
+{
+  "schema_name": "audience_segment",
+  "schema_version": "v1",
+  "correlation_id": "corr:golden-aud-01",
+  "created_at": "2026-04-20T00:00:00Z",
+  "segment_id": "aud:cmp:us_sports:main",
+  "campaign_id": "cmp:us_sports:202604",
+  "name": "US 18-24 运动爱好者主受众",
+  "description": "面向 US 18-24 对运动类内容高互动的用户,取自 CDP 段 us_young_sporty",
+  "size_estimate": 420000,
+  "hashed_user_ids": [
+    "h:sha256:us_young_sporty_001",
+    "h:sha256:us_young_sporty_002",
+    "h:sha256:us_young_sporty_003"
+  ],
+  "attributes": {
+    "geo": "US",
+    "age": "18-24",
+    "interest": "sports",
+    "device": "mobile"
+  },
+  "source": "cdp:segment:cdp:us_young_sporty",
+  "lookalike_seed_segment_id": null
+}

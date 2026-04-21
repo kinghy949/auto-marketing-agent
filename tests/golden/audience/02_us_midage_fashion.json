@@ -1,0 +1,23 @@
+{
+  "schema_name": "audience_segment",
+  "schema_version": "v1",
+  "correlation_id": "corr:golden-aud-02",
+  "created_at": "2026-04-20T00:00:00Z",
+  "segment_id": "aud:cmp:us_fashion:main",
+  "campaign_id": "cmp:us_fashion:202605",
+  "name": "US 25-34 时尚消费者",
+  "description": "女性为主的 25-34 时尚高互动人群,适合新品发布活动",
+  "size_estimate": 680000,
+  "hashed_user_ids": [
+    "h:sha256:us_midage_fashion_001",
+    "h:sha256:us_midage_fashion_002"
+  ],
+  "attributes": {
+    "geo": "US",
+    "age": "25-34",
+    "interest": "fashion",
+    "device": "mobile"
+  },
+  "source": "cdp:segment:cdp:us_midage_fashion",
+  "lookalike_seed_segment_id": null
+}

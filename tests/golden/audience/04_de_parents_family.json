@@ -1,0 +1,23 @@
+{
+  "schema_name": "audience_segment",
+  "schema_version": "v1",
+  "correlation_id": "corr:golden-aud-04",
+  "created_at": "2026-04-20T00:00:00Z",
+  "segment_id": "aud:cmp:de_family:main",
+  "campaign_id": "cmp:de_family:202604",
+  "name": "DE 亲子家庭核心人群",
+  "description": "德国 35-44 有未成年子女的家庭用户,desktop 为主,消费稳健",
+  "size_estimate": 310000,
+  "hashed_user_ids": [
+    "h:sha256:de_parents_family_001",
+    "h:sha256:de_parents_family_002"
+  ],
+  "attributes": {
+    "geo": "DE",
+    "age": "35-44",
+    "interest": "family",
+    "device": "desktop"
+  },
+  "source": "cdp:segment:cdp:de_parents_family",
+  "lookalike_seed_segment_id": null
+}

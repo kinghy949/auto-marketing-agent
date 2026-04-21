@@ -1,0 +1,25 @@
+{
+  "schema_name": "audience_segment",
+  "schema_version": "v1",
+  "correlation_id": "corr:golden-aud-03",
+  "created_at": "2026-04-20T00:00:00Z",
+  "segment_id": "aud:cmp:jp_gaming:premium",
+  "campaign_id": "cmp:jp_gaming:202604",
+  "name": "JP 高价值游戏玩家",
+  "description": "日本市场 premium tier 游戏玩家,ARPU 显著高于均值,适合旗舰活动",
+  "size_estimate": 95000,
+  "hashed_user_ids": [
+    "h:sha256:jp_gamers_premium_001",
+    "h:sha256:jp_gamers_premium_002",
+    "h:sha256:jp_gamers_premium_003",
+    "h:sha256:jp_gamers_premium_004"
+  ],
+  "attributes": {
+    "geo": "JP",
+    "age": "25-34",
+    "interest": "gaming",
+    "tier": "premium"
+  },
+  "source": "cdp:segment:cdp:jp_gamers_premium",
+  "lookalike_seed_segment_id": null
+}

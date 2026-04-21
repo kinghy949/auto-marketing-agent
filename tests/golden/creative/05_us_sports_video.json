@@ -1,0 +1,38 @@
+{
+  "schema_name": "creative_variant",
+  "schema_version": "v1",
+  "correlation_id": "corr:golden-cre-05",
+  "created_at": "2026-04-20T00:00:00Z",
+  "variant_id": "var:cmp:us_sports:video",
+  "campaign_id": "cmp:us_sports:202604",
+  "target_segment_id": "aud:cmp:us_sports:main",
+  "headline": "Watch the Launch",
+  "body": "Fifteen seconds to see what makes this drop different — then feel it on race day.",
+  "call_to_action": "Watch Now",
+  "language": "en-US",
+  "assets": [
+    {
+      "asset_id": "asset:slogan_sport_video_001",
+      "asset_type": "text",
+      "url": null,
+      "text": "Watch the Launch",
+      "rights": {
+        "licensor": "internal",
+        "license_id": "lic-internal-2026-002",
+        "expires_at": "2027-12-31T00:00:00Z"
+      }
+    },
+    {
+      "asset_id": "asset:sport_hero_002",
+      "asset_type": "video",
+      "url": "https://assets.example.com/sport_hero_002.mp4",
+      "text": null,
+      "rights": {
+        "licensor": "internal",
+        "license_id": "lic-internal-2026-002",
+        "expires_at": "2027-12-31T00:00:00Z"
+      }
+    }
+  ],
+  "generated_by": "creative-agent/gpt-4.1-mini"
+}

@@ -70,18 +70,18 @@
 
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
-| P0-030 | Audience Agent:CDP SQL tool + 输出 `AudienceSegment` | ⬜ | P0-011, P0-020 | 用 mock CDP 起步 |
-| P0-031 | Creative Agent:LLM 文案 + DALL·E 图片 | ⬜ | P0-012 | 视频留 P1 |
-| P0-032 | Orchestrator Agent:接收 KPI → handoff Audience → Creative | ⬜ | P0-030, P0-031 | 输出 JSON 给人 |
-| P0-033 | CLI 入口:`python -m auto_marketing_agent run --kpi ... --budget ...` | ⬜ | P0-032 | |
+| P0-030 | Audience Agent:CDP SQL tool + 输出 `AudienceSegment` | ✅ | P0-011, P0-020 | mock CDP(`agents/tools/cdp_mock.py`)+ `agents/audience.py` |
+| P0-031 | Creative Agent:LLM 文案 + DALL·E 图片 | ✅ | P0-012 | Asset Library mock(`agents/tools/asset_library_mock.py`)+ `agents/creative.py`;真实图像生成 P1 接入 |
+| P0-032 | Orchestrator Agent:接收 KPI → handoff Audience → Creative | ✅ | P0-030, P0-031 | `agents/orchestrator.py` 产 CampaignPlan;`agents/coordinator.py` Python 层串三段(真正事件驱动 handoff 留 P2) |
+| P0-033 | CLI 入口:`python -m auto_marketing_agent run --kpi ... --budget ...` | ✅ | P0-032 | `run --brief --correlation-id --model`,输出 plan/segment/variant 三份 JSON |
 
 ### Eval(最小可用)
 
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
-| P0-040 | 收集 ≥ 5 条 Audience golden case | ⬜ | P0-030 | |
-| P0-041 | 收集 ≥ 5 条 Creative golden case | ⬜ | P0-031 | |
-| P0-042 | `pytest` 集成 golden case 回归测试 | ⬜ | P0-040, P0-041 | |
+| P0-040 | 收集 ≥ 5 条 Audience golden case | ✅ | P0-030 | `tests/golden/audience/*.json`,5 条 |
+| P0-041 | 收集 ≥ 5 条 Creative golden case | ✅ | P0-031 | `tests/golden/creative/*.json`,5 条 |
+| P0-042 | `pytest` 集成 golden case 回归测试 | ✅ | P0-040, P0-041 | `tests/test_golden_cases.py`,21 个参数化断言 |
 
 ---
 
@@ -263,10 +263,10 @@
 | 阶段 | 总任务数 | 已完成 |
 |------|---------|--------|
 | 跨阶段 | 8 | 8 |
-| P0 | 22 | 13 |
+| P0 | 22 | 21 |
 | P1 | 18 | 0 |
 | P2 | 21 | 0 |
 | P3 | 18 | 0 |
-| **合计** | **87** | **21** |
+| **合计** | **87** | **29** |
 
 > 完成数随 commit 同步更新。

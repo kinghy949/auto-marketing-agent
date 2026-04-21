@@ -1,0 +1,18 @@
+{
+  "schema_name": "audience_segment",
+  "schema_version": "v1",
+  "correlation_id": "corr:golden-aud-05",
+  "created_at": "2026-04-20T00:00:00Z",
+  "segment_id": "aud:cmp:global_loyal:lookalike",
+  "campaign_id": "cmp:global_loyal:202604",
+  "name": "高复购高客单价会员的 Lookalike 扩展",
+  "description": "以种子 global_loyal_highspend 做 Lookalike 扩展,预估触达放大约 2x",
+  "size_estimate": 120000,
+  "hashed_user_ids": [],
+  "attributes": {
+    "tier": "loyal",
+    "interest": "lifestyle"
+  },
+  "source": "lookalike:meta",
+  "lookalike_seed_segment_id": "cdp:global_loyal_highspend"
+}

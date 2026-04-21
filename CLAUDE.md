@@ -18,14 +18,21 @@
 
 ## 仓库当前状态
 
-P0 进行中。骨架(`pyproject.toml` + `src/` + hello-world agent)与部分平台服务层已就位:
+P0 MVP 骨架已闭环,剩余阻塞项只有 P0-021(Meta Ads OAuth,需真实开发者账号):
 
 - **Schema Registry**(`src/auto_marketing_agent/schemas/`):7 条 v1 Pydantic schema + `registry.py` 查表
 - **Secrets 抽象 + scoped view**(`src/auto_marketing_agent/secrets/`):env 后端 + 审计接口,设计文档见 `docs/scoped-credentials.md`
 - **Tracing 封装**(`src/auto_marketing_agent/tracing.py`):`campaign_trace` 固定 SDK `group_id = campaign_id`
 - **CI/CD**(`.github/workflows/`):ci(ruff + mypy + pytest)+ security(gitleaks + pip-audit)
+- **业务 agent**(`src/auto_marketing_agent/agents/`):
+  - Orchestrator(`orchestrator.py`)→ CampaignPlan 结构化解析
+  - Audience(`audience.py`)+ mock CDP 工具(`tools/cdp_mock.py`)
+  - Creative(`creative.py`)+ mock Asset Library(`tools/asset_library_mock.py`)
+  - Coordinator(`coordinator.py`)Python 层串三段并做 correlation/campaign/segment ID 一致性校验
+- **CLI**:`auto-marketing-agent run --brief "..." [--correlation-id ...] [--model ...]` 一次吐出三份 payload 的 JSON
+- **Golden cases**(`tests/golden/`):5 条 Audience + 5 条 Creative,`tests/test_golden_cases.py` 作 CI 阻塞回归
 
-业务 agent(Audience / Creative / Orchestrator / Media Buyer / Attribution / Experiment / Guardrail)尚未实现。其它平台组件(Cost Guard、Event Store、Circuit Breaker、Data Layer、Knowledge Store)待 P1+。
+未实现:Media Buyer / Attribution / Experiment / Guardrail 四个 agent,以及 Cost Guard、Event Store、Circuit Breaker、Data Layer、Knowledge Store 五个平台组件,全部排在 P1+。事件驱动 handoff(Attribution → Creative 回炉)留 P2。
 
 技术栈决策见 [`docs/adr/0001-tech-stack.md`](docs/adr/0001-tech-stack.md);任务追踪见 [`docs/tasks.md`](docs/tasks.md)。
 

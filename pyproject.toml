@@ -51,6 +51,10 @@ ignore = []
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["B", "SIM"]
+# Agent instruction prompts are docstring-like Chinese paragraphs; 强制换行反而伤可读性。
+"src/auto_marketing_agent/agents/audience.py" = ["E501"]
+"src/auto_marketing_agent/agents/creative.py" = ["E501"]
+"src/auto_marketing_agent/agents/orchestrator.py" = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"

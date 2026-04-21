@@ -1,0 +1,38 @@
+{
+  "schema_name": "creative_variant",
+  "schema_version": "v1",
+  "correlation_id": "corr:golden-cre-02",
+  "created_at": "2026-04-20T00:00:00Z",
+  "variant_id": "var:cmp:us_fashion:main",
+  "campaign_id": "cmp:us_fashion:202605",
+  "target_segment_id": "aud:cmp:us_fashion:main",
+  "headline": "Spring Essentials, Reimagined",
+  "body": "Lightweight fabrics, relaxed silhouettes, shades that carry from brunch to boardroom.",
+  "call_to_action": "Discover the Drop",
+  "language": "en-US",
+  "assets": [
+    {
+      "asset_id": "asset:slogan_fashion_001",
+      "asset_type": "text",
+      "url": null,
+      "text": "Spring Essentials, Reimagined",
+      "rights": {
+        "licensor": "internal",
+        "license_id": "lic-internal-2026-030",
+        "expires_at": null
+      }
+    },
+    {
+      "asset_id": "asset:fashion_lifestyle_001",
+      "asset_type": "image",
+      "url": "https://assets.example.com/fashion_lifestyle_001.jpg",
+      "text": null,
+      "rights": {
+        "licensor": "getty_images",
+        "license_id": "lic-getty-87124",
+        "expires_at": "2028-06-30T00:00:00Z"
+      }
+    }
+  ],
+  "generated_by": "creative-agent/gpt-4.1-mini"
+}

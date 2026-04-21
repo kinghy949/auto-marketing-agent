@@ -12,6 +12,7 @@ import sys
 
 from auto_marketing_agent.agents.hello import run_hello
 from auto_marketing_agent.settings import load_settings
+from auto_marketing_agent.tracing import configure_tracing
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -33,6 +34,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    configure_tracing()
 
     if args.command == "hello":
         settings = load_settings()

@@ -1,0 +1,56 @@
+# 安全审查:secrets 扫描 + 依赖漏洞扫描
+# 对应任务 X-008。失败不阻塞合并(continue-on-error),但会在 PR 上留下提醒。
+# 若要升级为阻塞门禁,移除 continue-on-error 即可。
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 每周一 03:00 UTC 全量重扫一次,捕捉依赖新曝出的 CVE
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks 需要完整 git 历史才能扫历史 commit
+          fetch-depth: 0
+
+      - name: 运行 gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: 配置 Python
+        run: uv python install 3.12
+
+      - name: 导出锁定依赖
+        run: |
+          uv sync --all-extras
+          uv pip freeze > requirements.txt
+
+      - name: 运行 pip-audit
+        uses: pypa/gh-action-pip-audit@v1.1.0
+        with:
+          inputs: requirements.txt
+        continue-on-error: true

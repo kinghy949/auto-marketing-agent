@@ -1,0 +1,53 @@
+# CI 主流程:lint + 类型检查 + 单元测试
+# 对应任务 X-006。Eval Pipeline 阻塞合并(P2-012)会单独加作业。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-type-test:
+    name: lint + mypy + pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: 配置 Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: 安装依赖
+        run: uv sync --all-extras
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+      - name: mypy (strict)
+        run: uv run mypy src tests
+
+      - name: pytest
+        env:
+          # 禁用 tracing 上送,CI 跑离线测试不应调外部服务
+          AMA_TRACING_DISABLED: "1"
+        run: uv run pytest

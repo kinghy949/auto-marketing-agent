@@ -37,4 +37,4 @@ def load_settings() -> Settings:
 
     封装成函数便于测试时 monkeypatch,以及未来接入 Secrets Manager 时切换来源。
     """
-    return Settings()  # type: ignore[call-arg]
+    return Settings()

@@ -136,7 +136,7 @@
 
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
-| P1-060 | Dockerfile 与本地 docker-compose | ⬜ | P0-001 | |
+| P1-060 | Dockerfile 与本地 docker-compose | ✅ | P0-001 | 多阶段 `Dockerfile`(非 root)、`docker-compose.yml`、CI 加 `docker-build` 验证 `--help` |
 | P1-061 | K8s Helm chart 雏形 | ⬜ | P1-060 | 单租户 namespace |
 | P1-062 | 基础 Tracing dashboard(Grafana 或 SDK 自带) | ⬜ | P0-004 | |
 
@@ -264,9 +264,9 @@
 |------|---------|--------|
 | 跨阶段 | 8 | 8 |
 | P0 | 22 | 21 |
-| P1 | 18 | 7 |
+| P1 | 18 | 8 |
 | P2 | 21 | 0 |
 | P3 | 18 | 0 |
-| **合计** | **87** | **36** |
+| **合计** | **87** | **37** |
 
 > 完成数随 commit 同步更新。

@@ -52,3 +52,28 @@ jobs:
           # 禁用 tracing 上送,CI 跑离线测试不应调外部服务
           AMA_TRACING_DISABLED: "1"
         run: uv run pytest
+
+  docker-build:
+    name: docker build 验证
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建镜像(不 push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: auto-marketing-agent:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 验证 ENTRYPOINT + --help
+        # --help 走 argparse 内置路径,不会触发 load_settings / configure_tracing,
+        # 所以不需要 OPENAI_API_KEY 也能退出 0
+        run: docker run --rm auto-marketing-agent:ci --help

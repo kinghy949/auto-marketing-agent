@@ -1,0 +1,32 @@
+# 不拷进镜像:构建缓存 / 测试 / 文档 / secrets / 本地 venv
+.git/
+.github/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 测试与文档不进运行时镜像 —— 减体积 + 减攻击面
+tests/
+docs/
+
+# 本地 env 文件一律不进镜像,运行时通过 docker run --env-file / compose env_file 注入
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docker 自身产物
+Dockerfile
+.dockerignore
+docker-compose.yml

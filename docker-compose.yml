@@ -1,0 +1,22 @@
+# 本地开发用:一键跑 CLI,环境变量从 .env 注入。
+#
+# 常用命令:
+#   docker compose build                      # 构建镜像
+#   docker compose run --rm app --help        # 查看 CLI 帮助
+#   docker compose run --rm app hello         # 跑烟雾测试
+#   docker compose run --rm app \
+#     run --brief "美国 18-24 运动人群 ROAS 活动"
+#
+# 生产部署走 K8s Helm(P1-061),不在这里拉 Postgres / Redis 这些依赖。
+# P1-020 落地 Event Store 时会在这个 compose 里加 postgres service。
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: auto-marketing-agent:local
+    env_file:
+      - .env
+    # 默认打印 --help。真实运行由 `docker compose run --rm app <子命令>` 覆盖 CMD。
+    command: ["--help"]

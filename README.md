@@ -6,7 +6,25 @@
 
 ## 当前状态
 
-早期设计阶段。架构详见 [`docs/architecture.md`](docs/architecture.md)。**尚无运行时代码**。
+P0 MVP 骨架已闭环,P1 离线部分(Cost Guard L1 + 重规划 / 重试装饰器 / Guardrail / HITL 队列)已落地。阻塞项仅剩 P0-021(Meta Ads OAuth,需真实开发者账号)。任务追踪见 [`docs/tasks.md`](docs/tasks.md),架构详见 [`docs/architecture.md`](docs/architecture.md)。
+
+## 本地运行
+
+**uv(推荐)**:
+
+```bash
+uv sync --all-extras
+cp .env.example .env   # 填入 OPENAI_API_KEY
+uv run auto-marketing-agent run --brief "美国 18-24 运动人群的 ROAS 活动"
+```
+
+**Docker**:
+
+```bash
+cp .env.example .env   # 填入 OPENAI_API_KEY
+docker compose build
+docker compose run --rm app run --brief "美国 18-24 运动人群的 ROAS 活动"
+```
 
 ## 目标用户
 

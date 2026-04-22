@@ -35,6 +35,7 @@ P0 MVP 骨架已闭环,P1 离线部分(Cost Guard L1 / 重试装饰器 / Guardra
 - **Guardrail 规则引擎**(`src/auto_marketing_agent/guardrail/`):品牌词典 + 中国广告法绝对化 / 医疗 + 欧盟基础比较 / 儿童宣传 4 类规则,`evaluate_variant` 产出 ApprovalDecision
 - **HITL 内存队列**(`src/auto_marketing_agent/hitl/`):`InMemoryHitlQueue` 幂等入队 / resolve 状态机,coordinator 在 Guardrail 产出 `needs_hitl` 时自动入队,生产后端留 P2
 - **CLI**:`auto-marketing-agent run --brief "..." [--correlation-id ...] [--model ...]` 一次吐出三份 payload 的 JSON
+- **Docker 化**(`Dockerfile` + `docker-compose.yml`):多阶段构建、非 root 运行、CI 里加 `docker-build` 验证 `--help`
 - **Golden cases**(`tests/golden/`):5 条 Audience + 5 条 Creative,`tests/test_golden_cases.py` 作 CI 阻塞回归
 
 未实现:Media Buyer / Attribution / Experiment 三个 agent,以及 Event Store、Circuit Breaker、Data Layer、Knowledge Store 四个平台组件,以及 DLQ / HITL 持久化后端 / Cost Guard L2-L3,全部排在 P1+。事件驱动 handoff(Attribution → Creative 回炉)留 P2。
@@ -63,6 +64,14 @@ ruff check . && ruff format . && mypy src tests && pytest
 ```
 
 运行前把 `.env.example` 复制为 `.env` 并填 `OPENAI_API_KEY`。
+
+**Docker 路径**(P1-060):
+
+```bash
+docker compose build
+docker compose run --rm app --help
+docker compose run --rm app run --brief "..."
+```
 
 ## 设计文档位置
 

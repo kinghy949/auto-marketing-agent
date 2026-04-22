@@ -21,6 +21,7 @@ from auto_marketing_agent.agents.coordinator import (
     run_campaign,
 )
 from auto_marketing_agent.cost_guard import CostGuard, CostGuardConfig, CostGuardDenied
+from auto_marketing_agent.events import InMemoryEventStore
 from auto_marketing_agent.hitl import InMemoryHitlQueue
 from auto_marketing_agent.schemas.common import KPITarget, Money
 from auto_marketing_agent.schemas.v1.approval import ApprovalDecision
@@ -567,3 +568,176 @@ async def test_run_campaign_rejects_negative_max_cost_replans(
             agents=agents,
             max_cost_replans=-1,
         )
+
+
+# ---------------------------------------------------------------------------
+# Event Store 集成 —— P1-020/021
+# ---------------------------------------------------------------------------
+
+
+def _build_default_agents() -> CampaignAgents:
+    from auto_marketing_agent.agents.audience import build_audience_agent
+    from auto_marketing_agent.agents.creative import build_creative_agent
+    from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
+
+    return CampaignAgents(
+        orchestrator=build_orchestrator_agent(model="stub"),
+        audience=build_audience_agent(model="stub"),
+        creative=build_creative_agent(model="stub"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_store_records_happy_path_emission_order(
+    stub_runner: list[Any],
+) -> None:
+    store = InMemoryEventStore()
+    await run_campaign(
+        brief="x",
+        correlation_id=CORRELATION,
+        agents=_build_default_agents(),
+        event_store=store,
+    )
+
+    # 三次 cost_guard.authorized(orch/audience/creative)+ guardrail.evaluated
+    # + campaign.completed == 共 5 条,不应出现 denied / rejected / hitl / replan
+    types = [e.event_type for e in store.list_all()]
+    assert types == [
+        "cost_guard.authorized",
+        "cost_guard.authorized",
+        "cost_guard.authorized",
+        "guardrail.evaluated",
+        "campaign.completed",
+    ]
+    # 所有事件都挂同一个 correlation_id
+    assert all(e.correlation_id == CORRELATION for e in store.list_all())
+    # 第一个 cost_guard.authorized 在 plan 产出前,campaign_id 必须为 None
+    first = store.list_all()[0]
+    assert first.campaign_id is None
+    assert first.payload["agent_name"] == "orchestrator-agent"
+    # 后续事件都带 campaign_id
+    assert all(e.campaign_id == CAMPAIGN_ID for e in store.list_all()[1:])
+
+
+@pytest.mark.asyncio
+async def test_event_store_records_guardrail_and_creative_rejected(
+    stub_runner_with_reject_variant: list[Any],
+) -> None:
+    store = InMemoryEventStore()
+    with pytest.raises(CreativeRejected):
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            event_store=store,
+        )
+
+    types = [e.event_type for e in store.list_all()]
+    # 最后两条必须是 guardrail.evaluated(decision=reject)+ creative.rejected
+    assert types[-2:] == ["guardrail.evaluated", "creative.rejected"]
+    evaluated = store.list_by_type("guardrail.evaluated")[0]
+    assert evaluated.payload["decision"] == "reject"
+    assert "cn_ad_law:absolute_superlatives" in evaluated.payload["violations"]
+    rejected = store.list_by_type("creative.rejected")[0]
+    assert rejected.payload["subject_id"] == "var:unit:main"
+    # campaign.completed 不应该被发出
+    assert store.list_by_type("campaign.completed") == []
+
+
+@pytest.mark.asyncio
+async def test_event_store_records_hitl_enqueue(
+    stub_runner_with_hitl_variant: list[Any],
+) -> None:
+    store = InMemoryEventStore()
+    queue = InMemoryHitlQueue()
+    result = await run_campaign(
+        brief="x",
+        correlation_id=CORRELATION,
+        agents=_build_default_agents(),
+        hitl_queue=queue,
+        event_store=store,
+    )
+
+    assert result.hitl_item is not None
+    hitl_events = store.list_by_type("hitl.enqueued")
+    assert len(hitl_events) == 1
+    assert hitl_events[0].payload["hitl_item_id"] == result.hitl_item.item_id
+    assert hitl_events[0].payload["approval_id"] == result.approval.approval_id
+    # campaign.completed 仍然发出(needs_hitl 是 coordinator 的正常终态)
+    completed = store.list_by_type("campaign.completed")
+    assert len(completed) == 1
+    assert completed[0].payload["approval_decision"] == "needs_hitl"
+
+
+@pytest.mark.asyncio
+async def test_event_store_records_cost_guard_denial_without_completed(
+    stub_runner: list[Any],
+) -> None:
+    store = InMemoryEventStore()
+    strict_guard = CostGuard(CostGuardConfig(1, 1, 1))
+
+    with pytest.raises(CostGuardDenied):
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            cost_guard=strict_guard,
+            event_store=store,
+        )
+
+    types = [e.event_type for e in store.list_all()]
+    # Orchestrator 首次 authorize_call 即拒,只应有一条 cost_guard.denied
+    assert types == ["cost_guard.denied"]
+    denied = store.list_by_type("cost_guard.denied")[0]
+    assert denied.payload["agent_name"] == "orchestrator-agent"
+    assert denied.campaign_id is None
+
+
+@pytest.mark.asyncio
+async def test_event_store_records_replan_between_attempts(
+    stub_runner_for_replan: list[Any],
+) -> None:
+    store = InMemoryEventStore()
+    guard = _DenyAgentFirstTimesCostGuard(deny_agent="audience-agent", deny_times=1)
+
+    await run_campaign(
+        brief="初始 brief",
+        correlation_id=CORRELATION,
+        agents=_build_default_agents(),
+        cost_guard=guard,
+        event_store=store,
+    )
+
+    replan = store.list_by_type("cost_replan.triggered")
+    assert len(replan) == 1
+    assert replan[0].payload == {
+        "denied_agent": "audience-agent",
+        "limit_kind": "prompt_tokens",
+        "attempt_number": 1,
+    }
+    # 事件顺序:尝试 1 的 orch authorize → audience denied → replan triggered →
+    # 尝试 2 的 orch / audience / creative authorize → guardrail → completed
+    types = [e.event_type for e in store.list_all()]
+    assert types == [
+        "cost_guard.authorized",  # 尝试 1 orch
+        "cost_guard.denied",  # 尝试 1 audience 被拒
+        "cost_replan.triggered",
+        "cost_guard.authorized",  # 尝试 2 orch
+        "cost_guard.authorized",  # 尝试 2 audience
+        "cost_guard.authorized",  # 尝试 2 creative
+        "guardrail.evaluated",
+        "campaign.completed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_campaign_without_event_store_still_succeeds(
+    stub_runner: list[Any],
+) -> None:
+    """不传 event_store 时 coordinator 必须静默运行,不应 AttributeError。"""
+    result = await run_campaign(
+        brief="x",
+        correlation_id=CORRELATION,
+        agents=_build_default_agents(),
+    )
+    assert result.approval.decision == "approve"

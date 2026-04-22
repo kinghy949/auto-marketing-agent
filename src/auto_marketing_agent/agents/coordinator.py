@@ -28,6 +28,7 @@ from auto_marketing_agent.cost_guard import (
     CostGuardDenied,
     estimate_prompt_tokens,
 )
+from auto_marketing_agent.events import Event, EventStore, EventType
 from auto_marketing_agent.guardrail import GuardrailEngine, default_engine
 from auto_marketing_agent.hitl import HitlItem, HitlQueue
 from auto_marketing_agent.schemas.v1.approval import ApprovalDecision
@@ -122,25 +123,86 @@ def _check_consistency(result: CampaignRunResult) -> None:
         raise ValueError(f"correlation_id 在三份 payload 间不一致: {correlation_ids}")
 
 
+def _emit_event(
+    event_store: EventStore | None,
+    *,
+    event_type: EventType,
+    source: str,
+    correlation_id: str,
+    campaign_id: str | None,
+    payload: dict[str, Any],
+) -> None:
+    """如传入了 event_store,就 append 一条事件;否则静默跳过。
+
+    不 try/except 包裹 —— append 失败是基础设施故障,应该向上冒泡而不是吞掉。
+    coordinator 本身不做 event 写入重试(那是 P2 Postgres 后端自己的职责)。
+    """
+    if event_store is None:
+        return
+    event_store.append(
+        Event(
+            event_type=event_type,
+            source=source,
+            correlation_id=correlation_id,
+            campaign_id=campaign_id,
+            payload=payload,
+        )
+    )
+
+
 async def _authorized_run(
     *,
     agent: Agent[None],
     prompt: str,
     cost_guard: CostGuard,
     decisions: list[CostGuardDecision],
+    event_store: EventStore | None,
+    correlation_id: str,
+    campaign_id: str | None,
 ) -> Any:
     """调 Cost Guard L1 放行后再跑 Runner。
 
-    拒绝时 `CostGuardDenied` 直接向上抛,由 caller(run_campaign / 未来的 HITL 流)决定
-    是否重试。放行 decision 追加进 `decisions`,供 P1-021 Event Store 整批 flush。
+    Cost Guard 放行发 `cost_guard.authorized`;拒绝发 `cost_guard.denied` 再抛
+    `CostGuardDenied`,由 caller 决定是否重试。`decisions` 列表保留原职责,供
+    P2 批量 flush 使用;`event_store` 是即时写入的独立通道,互不替代。
     """
     output_budget = _ESTIMATED_OUTPUT_TOKENS.get(agent.name, _DEFAULT_OUTPUT_TOKENS)
-    decision = cost_guard.authorize_call(
-        agent_name=agent.name,
-        estimated_prompt_tokens=estimate_prompt_tokens(prompt),
-        estimated_output_tokens=output_budget,
-    )
+    try:
+        decision = cost_guard.authorize_call(
+            agent_name=agent.name,
+            estimated_prompt_tokens=estimate_prompt_tokens(prompt),
+            estimated_output_tokens=output_budget,
+        )
+    except CostGuardDenied as denial:
+        _emit_event(
+            event_store,
+            event_type="cost_guard.denied",
+            source="coordinator",
+            correlation_id=correlation_id,
+            campaign_id=campaign_id,
+            payload={
+                "agent_name": denial.agent_name,
+                "level": denial.level,
+                "limit_kind": denial.limit_kind,
+                "observed": denial.observed,
+                "limit": denial.limit,
+            },
+        )
+        raise
     decisions.append(decision)
+    _emit_event(
+        event_store,
+        event_type="cost_guard.authorized",
+        source="coordinator",
+        correlation_id=correlation_id,
+        campaign_id=campaign_id,
+        payload={
+            "agent_name": agent.name,
+            "level": decision.level,
+            "estimated_prompt_tokens": decision.estimated_prompt_tokens,
+            "estimated_output_tokens": decision.estimated_output_tokens,
+        },
+    )
     return await Runner.run(agent, prompt)
 
 
@@ -168,12 +230,20 @@ async def _run_campaign_once(
     cost_guard: CostGuard,
     guardrail_engine: GuardrailEngine,
     hitl_queue: HitlQueue | None,
+    event_store: EventStore | None,
 ) -> CampaignRunResult:
     """单次 Orchestrator → Audience → Creative → Guardrail 闭环。
 
     成功返回结果;任何 Cost Guard 拒绝都原样抛出,由外层 `run_campaign` 决定是否重规划。
     Guardrail `reject` 抛 `CreativeRejected`,不在重规划覆盖范围 —— 内容违规重跑规划
     也解决不了。
+
+    事件发射时序:
+    - Orchestrator 之前还没有 campaign_id,cost_guard 事件只带 correlation_id。
+    - Audience / Creative 之前已经有 plan.campaign_id,cost_guard 事件带 campaign_id。
+    - Guardrail 评估结果发 `guardrail.evaluated`;reject 再补一条 `creative.rejected`
+      再抛异常;needs_hitl 入队后发 `hitl.enqueued`。
+    - 成功回到 caller 前发 `campaign.completed`。
     """
     decisions: list[CostGuardDecision] = []
 
@@ -183,6 +253,9 @@ async def _run_campaign_once(
         prompt=orch_input,
         cost_guard=cost_guard,
         decisions=decisions,
+        event_store=event_store,
+        correlation_id=correlation_id,
+        campaign_id=None,
     )
     plan = plan_run.final_output_as(CampaignPlan)
 
@@ -197,6 +270,9 @@ async def _run_campaign_once(
             prompt=audience_input,
             cost_guard=cost_guard,
             decisions=decisions,
+            event_store=event_store,
+            correlation_id=correlation_id,
+            campaign_id=plan.campaign_id,
         )
         segment = segment_run.final_output_as(AudienceSegment)
 
@@ -211,6 +287,9 @@ async def _run_campaign_once(
             prompt=creative_input,
             cost_guard=cost_guard,
             decisions=decisions,
+            event_store=event_store,
+            correlation_id=correlation_id,
+            campaign_id=plan.campaign_id,
         )
         variant = variant_run.final_output_as(CreativeVariant)
 
@@ -219,7 +298,30 @@ async def _run_campaign_once(
         brand_guardrails=list(plan.brand_guardrails),
         correlation_id=correlation_id,
     )
+    _emit_event(
+        event_store,
+        event_type="guardrail.evaluated",
+        source="guardrail",
+        correlation_id=correlation_id,
+        campaign_id=plan.campaign_id,
+        payload={
+            "subject_id": approval.subject_id,
+            "decision": approval.decision,
+            "violations": list(approval.violations),
+        },
+    )
     if approval.decision == "reject":
+        _emit_event(
+            event_store,
+            event_type="creative.rejected",
+            source="coordinator",
+            correlation_id=correlation_id,
+            campaign_id=plan.campaign_id,
+            payload={
+                "subject_id": approval.subject_id,
+                "violations": list(approval.violations),
+            },
+        )
         raise CreativeRejected(approval)
 
     hitl_item: HitlItem | None = None
@@ -228,6 +330,17 @@ async def _run_campaign_once(
             approval=approval,
             variant=variant,
             brand_guardrails=tuple(plan.brand_guardrails),
+        )
+        _emit_event(
+            event_store,
+            event_type="hitl.enqueued",
+            source="hitl",
+            correlation_id=correlation_id,
+            campaign_id=plan.campaign_id,
+            payload={
+                "hitl_item_id": hitl_item.item_id,
+                "approval_id": approval.approval_id,
+            },
         )
 
     result = CampaignRunResult(
@@ -238,6 +351,19 @@ async def _run_campaign_once(
         hitl_item=hitl_item,
     )
     _check_consistency(result)
+    _emit_event(
+        event_store,
+        event_type="campaign.completed",
+        source="coordinator",
+        correlation_id=correlation_id,
+        campaign_id=plan.campaign_id,
+        payload={
+            "campaign_id": plan.campaign_id,
+            "segment_id": segment.segment_id,
+            "variant_id": variant.variant_id,
+            "approval_decision": approval.decision,
+        },
+    )
     return result
 
 
@@ -249,6 +375,7 @@ async def run_campaign(
     cost_guard: CostGuard | None = None,
     guardrail_engine: GuardrailEngine | None = None,
     hitl_queue: HitlQueue | None = None,
+    event_store: EventStore | None = None,
     max_cost_replans: int = 1,
 ) -> CampaignRunResult:
     """按 brief 跑完 Orchestrator → Audience → Creative → Guardrail 四步。
@@ -268,7 +395,13 @@ async def run_campaign(
     会把拒绝上下文追加到 brief,重跑 Orchestrator → Audience → Creative 链,让
     Orchestrator 产出更精简的 CampaignPlan。最多重试 `max_cost_replans` 次,超限或
     Orchestrator 自身被拒(brief 太长没法自动压缩)直接把最后一次的 `CostGuardDenied`
-    抛出。`max_cost_replans=0` 完全关闭重规划,任何拒绝直接抛。
+    抛出。`max_cost_replans=0` 完全关闭重规划,任何拒绝直接抛。每次触发重规划发
+    `cost_replan.triggered`,方便重放时还原 brief 的演化轨迹。
+
+    **事件(P1-020/021):** 如传入 `event_store`,coordinator 会在 cost_guard /
+    guardrail / creative.rejected / hitl.enqueued / cost_replan.triggered /
+    campaign.completed 六个位点 append 事件。不传则全链路静默运行,单测 CLI 默认
+    不开,生产 CLI 与 P2 worker 必须开。
     """
     if max_cost_replans < 0:
         raise ValueError(f"max_cost_replans 必须 >= 0,收到 {max_cost_replans}")
@@ -278,8 +411,10 @@ async def run_campaign(
 
     attempts_remaining = max_cost_replans + 1
     current_brief = brief
+    attempt_number = 0
     while True:
         attempts_remaining -= 1
+        attempt_number += 1
         try:
             return await _run_campaign_once(
                 brief=current_brief,
@@ -288,6 +423,7 @@ async def run_campaign(
                 cost_guard=guard,
                 guardrail_engine=engine,
                 hitl_queue=hitl_queue,
+                event_store=event_store,
             )
         except CostGuardDenied as denial:
             # Orchestrator 自身被拒 = brief 太长,没法再压缩;重试只会卡在同一步。
@@ -295,4 +431,16 @@ async def run_campaign(
                 raise
             if attempts_remaining <= 0:
                 raise
+            _emit_event(
+                event_store,
+                event_type="cost_replan.triggered",
+                source="coordinator",
+                correlation_id=correlation_id,
+                campaign_id=None,
+                payload={
+                    "denied_agent": denial.agent_name,
+                    "limit_kind": denial.limit_kind,
+                    "attempt_number": attempt_number,
+                },
+            )
             current_brief = f"{brief}\n\n{_format_replan_hint(denial)}"

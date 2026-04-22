@@ -22,6 +22,7 @@ from auto_marketing_agent.agents.coordinator import (
     run_campaign,
 )
 from auto_marketing_agent.agents.hello import run_hello
+from auto_marketing_agent.events import InMemoryEventStore
 from auto_marketing_agent.hitl import InMemoryHitlQueue
 from auto_marketing_agent.settings import load_settings
 from auto_marketing_agent.tracing import configure_tracing
@@ -93,15 +94,22 @@ def main(argv: list[str] | None = None) -> int:
         correlation_id = args.correlation_id or f"corr:{uuid.uuid4()}"
         agents = build_default_agents(model=model)
         hitl_queue = InMemoryHitlQueue()
+        # 内存 event store:P1 单进程 CLI 只在输出里报 event 数,重放 CLI(P1-022)
+        # 接入后会切到持久化后端。
+        event_store = InMemoryEventStore()
         result = asyncio.run(
             run_campaign(
                 brief=args.brief,
                 correlation_id=correlation_id,
                 agents=agents,
                 hitl_queue=hitl_queue,
+                event_store=event_store,
             )
         )
-        print(_dump_result(result))
+        output = _dump_result(result)
+        output_obj = json.loads(output)
+        output_obj["event_count"] = len(event_store)
+        print(json.dumps(output_obj, ensure_ascii=False, indent=2))
         return 0
 
     parser.error(f"未知命令: {args.command}")

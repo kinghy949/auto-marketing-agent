@@ -100,8 +100,8 @@
 
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
-| P1-020 | PostgreSQL append-only event 表设计 | ⬜ | X-005 | |
-| P1-021 | Event 写入 SDK(每个 agent decision 一条) | ⬜ | P1-020 | |
+| P1-020 | PostgreSQL append-only event 表设计 | ✅ | X-005 | `migrations/001_events.sql` + ADR-0002,单表 + JSONB + append-only 触发器 |
+| P1-021 | Event 写入 SDK(每个 agent decision 一条) | ✅ | P1-020 | `events/` 包,Protocol + InMemoryEventStore;coordinator 在 7 个位点发射事件 |
 | P1-022 | 按 `campaign_id` 重放工具 | ⬜ | P1-021 | CLI 命令 |
 | P1-023 | Event 查询 API(供调试 / 离线 eval 使用) | ⬜ | P1-021 | |
 

@@ -30,7 +30,7 @@ P0 MVP 骨架已闭环,P1 离线部分(Cost Guard L1 / 重试装饰器 / Guardra
   - Creative(`creative.py`)+ mock Asset Library(`tools/asset_library_mock.py`)
   - Guardrail(`guardrail.py`)+ 机审工具(`tools/guardrail_check.py`)
   - Coordinator(`coordinator.py`)Python 层串三段并做 correlation/campaign/segment ID 一致性校验
-- **Cost Guard L1**(`src/auto_marketing_agent/cost_guard/`):`CostGuard.authorize_call` 拦截单次调用 token 上限,已在 coordinator 每步 Runner.run 前调用
+- **Cost Guard L1**(`src/auto_marketing_agent/cost_guard/`):`CostGuard.authorize_call` 拦截单次调用 token 上限,已在 coordinator 每步 Runner.run 前调用;Audience / Creative 阶段被拒时 coordinator 会把拒绝上下文追加到 brief 重跑一次(`max_cost_replans` 控制)
 - **通用重试装饰器**(`src/auto_marketing_agent/retry.py`):`@retry(retry_on=(...))` 指数退避 + 抖动,同步 / 异步共用
 - **Guardrail 规则引擎**(`src/auto_marketing_agent/guardrail/`):品牌词典 + 中国广告法绝对化 / 医疗 + 欧盟基础比较 / 儿童宣传 4 类规则,`evaluate_variant` 产出 ApprovalDecision
 - **HITL 内存队列**(`src/auto_marketing_agent/hitl/`):`InMemoryHitlQueue` 幂等入队 / resolve 状态机,coordinator 在 Guardrail 产出 `needs_hitl` 时自动入队,生产后端留 P2

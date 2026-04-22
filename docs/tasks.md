@@ -94,7 +94,7 @@
 | P1-001 | L1 单调用 token ceiling 拦截器 | ✅ | P0-002 | `cost_guard.CostGuard.authorize_call`,已接入 coordinator |
 | P1-002 | L2 单 Campaign 单日 token cap | ⬜ | P1-001, P1-020 | 需 Event Store 累计 |
 | P1-003 | L3 平台层 daily LLM cost cap | ⬜ | P1-002 | |
-| P1-004 | Cost Guard 拒绝时通知 Orchestrator 重新规划 | ⬜ | P1-001 | |
+| P1-004 | Cost Guard 拒绝时通知 Orchestrator 重新规划 | ✅ | P1-001 | `run_campaign` 的重规划循环:Audience / Creative 阶段被拒时把拒绝上下文塞回 brief 重跑,`max_cost_replans` 控制上限 |
 
 ### Event Store
 
@@ -264,9 +264,9 @@
 |------|---------|--------|
 | 跨阶段 | 8 | 8 |
 | P0 | 22 | 21 |
-| P1 | 18 | 6 |
+| P1 | 18 | 7 |
 | P2 | 21 | 0 |
 | P3 | 18 | 0 |
-| **合计** | **87** | **35** |
+| **合计** | **87** | **36** |
 
 > 完成数随 commit 同步更新。

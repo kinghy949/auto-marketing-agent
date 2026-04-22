@@ -25,6 +25,7 @@ from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
 from auto_marketing_agent.cost_guard import (
     CostGuard,
     CostGuardDecision,
+    CostGuardDenied,
     estimate_prompt_tokens,
 )
 from auto_marketing_agent.guardrail import GuardrailEngine, default_engine
@@ -143,37 +144,44 @@ async def _authorized_run(
     return await Runner.run(agent, prompt)
 
 
-async def run_campaign(
+def _format_replan_hint(denial: CostGuardDenied) -> str:
+    """把 Cost Guard 拒绝原因渲染成给 Orchestrator 看的中文提示。
+
+    Orchestrator 拿到这段文本会追加到下一轮 brief 末尾,从而产出更精简的 CampaignPlan
+    (更短的 brand_guardrails / description / platforms)。措辞刻意具体化 limit_kind 与
+    observed/limit,方便模型定位压缩方向。
+    """
+    return (
+        f"[Cost Guard 重规划提示] 上一轮规划在 {denial.agent_name} 阶段被 "
+        f"Cost Guard {denial.level} 拒绝(limit_kind={denial.limit_kind},"
+        f"observed={denial.observed},limit={denial.limit})。"
+        "请产出更精简的 CampaignPlan:优先压缩 brand_guardrails 条目数量与措辞长度,"
+        "必要时收敛 platforms 列表与 description 文本,务必保持核心 KPI 与预算不变。"
+    )
+
+
+async def _run_campaign_once(
     brief: str,
     *,
     correlation_id: str,
     agents: CampaignAgents,
-    cost_guard: CostGuard | None = None,
-    guardrail_engine: GuardrailEngine | None = None,
-    hitl_queue: HitlQueue | None = None,
+    cost_guard: CostGuard,
+    guardrail_engine: GuardrailEngine,
+    hitl_queue: HitlQueue | None,
 ) -> CampaignRunResult:
-    """按 brief 跑完 Orchestrator → Audience → Creative → Guardrail 四步。
+    """单次 Orchestrator → Audience → Creative → Guardrail 闭环。
 
-    `correlation_id` 由上游(CLI / event bus)传入,sender 负责去重。`campaign_id` 由
-    Orchestrator agent 自己决定并写进 CampaignPlan,coordinator 不干预。
-
-    每次 Runner.run 前过 Cost Guard L1(CLAUDE.md 硬约束:每次 LLM 调用前必须过)。
-    `cost_guard=None` 时用默认保守配置;传入自定义 guard 可以做更严苛的上限。
-
-    Creative 产出后立即过 Guardrail 机审 —— 确定性规则,不调 LLM,零成本。reject 直接
-    抛 `CreativeRejected`,不让违规素材进入下游(未来的 Media Buyer / Event Store)。
-    needs_hitl 会入 `hitl_queue`(如传入),coordinator 本身不阻塞 —— 是否暂停投放
-    由 caller(Web UI / 事件消费者)依据工单状态决定。
+    成功返回结果;任何 Cost Guard 拒绝都原样抛出,由外层 `run_campaign` 决定是否重规划。
+    Guardrail `reject` 抛 `CreativeRejected`,不在重规划覆盖范围 —— 内容违规重跑规划
+    也解决不了。
     """
-    guard = cost_guard or CostGuard()
-    engine = guardrail_engine or default_engine()
     decisions: list[CostGuardDecision] = []
 
     orch_input = f"correlation_id={correlation_id}\n\nbrief:\n{brief}"
     plan_run = await _authorized_run(
         agent=agents.orchestrator,
         prompt=orch_input,
-        cost_guard=guard,
+        cost_guard=cost_guard,
         decisions=decisions,
     )
     plan = plan_run.final_output_as(CampaignPlan)
@@ -187,7 +195,7 @@ async def run_campaign(
         segment_run = await _authorized_run(
             agent=agents.audience,
             prompt=audience_input,
-            cost_guard=guard,
+            cost_guard=cost_guard,
             decisions=decisions,
         )
         segment = segment_run.final_output_as(AudienceSegment)
@@ -201,12 +209,12 @@ async def run_campaign(
         variant_run = await _authorized_run(
             agent=agents.creative,
             prompt=creative_input,
-            cost_guard=guard,
+            cost_guard=cost_guard,
             decisions=decisions,
         )
         variant = variant_run.final_output_as(CreativeVariant)
 
-    approval = engine.evaluate_variant(
+    approval = guardrail_engine.evaluate_variant(
         variant,
         brand_guardrails=list(plan.brand_guardrails),
         correlation_id=correlation_id,
@@ -231,3 +239,60 @@ async def run_campaign(
     )
     _check_consistency(result)
     return result
+
+
+async def run_campaign(
+    brief: str,
+    *,
+    correlation_id: str,
+    agents: CampaignAgents,
+    cost_guard: CostGuard | None = None,
+    guardrail_engine: GuardrailEngine | None = None,
+    hitl_queue: HitlQueue | None = None,
+    max_cost_replans: int = 1,
+) -> CampaignRunResult:
+    """按 brief 跑完 Orchestrator → Audience → Creative → Guardrail 四步。
+
+    `correlation_id` 由上游(CLI / event bus)传入,sender 负责去重。`campaign_id` 由
+    Orchestrator agent 自己决定并写进 CampaignPlan,coordinator 不干预。
+
+    每次 Runner.run 前过 Cost Guard L1(CLAUDE.md 硬约束:每次 LLM 调用前必须过)。
+    `cost_guard=None` 时用默认保守配置;传入自定义 guard 可以做更严苛的上限。
+
+    Creative 产出后立即过 Guardrail 机审 —— 确定性规则,不调 LLM,零成本。reject 直接
+    抛 `CreativeRejected`,不让违规素材进入下游(未来的 Media Buyer / Event Store)。
+    needs_hitl 会入 `hitl_queue`(如传入),coordinator 本身不阻塞 —— 是否暂停投放
+    由 caller(Web UI / 事件消费者)依据工单状态决定。
+
+    **重规划(P1-004):** Audience / Creative 阶段被 Cost Guard 拒时,coordinator
+    会把拒绝上下文追加到 brief,重跑 Orchestrator → Audience → Creative 链,让
+    Orchestrator 产出更精简的 CampaignPlan。最多重试 `max_cost_replans` 次,超限或
+    Orchestrator 自身被拒(brief 太长没法自动压缩)直接把最后一次的 `CostGuardDenied`
+    抛出。`max_cost_replans=0` 完全关闭重规划,任何拒绝直接抛。
+    """
+    if max_cost_replans < 0:
+        raise ValueError(f"max_cost_replans 必须 >= 0,收到 {max_cost_replans}")
+
+    guard = cost_guard or CostGuard()
+    engine = guardrail_engine or default_engine()
+
+    attempts_remaining = max_cost_replans + 1
+    current_brief = brief
+    while True:
+        attempts_remaining -= 1
+        try:
+            return await _run_campaign_once(
+                brief=current_brief,
+                correlation_id=correlation_id,
+                agents=agents,
+                cost_guard=guard,
+                guardrail_engine=engine,
+                hitl_queue=hitl_queue,
+            )
+        except CostGuardDenied as denial:
+            # Orchestrator 自身被拒 = brief 太长,没法再压缩;重试只会卡在同一步。
+            if denial.agent_name == "orchestrator-agent":
+                raise
+            if attempts_remaining <= 0:
+                raise
+            current_brief = f"{brief}\n\n{_format_replan_hint(denial)}"

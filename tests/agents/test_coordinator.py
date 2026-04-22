@@ -381,7 +381,189 @@ async def test_run_campaign_raises_when_cost_guard_denies(
             agents=agents,
             cost_guard=strict_guard,
         )
-    # 第一步 orchestrator 就被拒
+    # 第一步 orchestrator 就被拒 —— brief 无法自动压缩,replan 应跳过直接抛
     assert exc.value.agent_name == "orchestrator-agent"
     # 被拒前 Runner.run 不应被调用
     assert stub_runner == []
+
+
+class _DenyAgentFirstTimesCostGuard(CostGuard):
+    """对指定 agent 的前 N 次调用硬拒,之后放行。用来模拟"第 1 次规划超限、重规划后通过"。"""
+
+    def __init__(self, *, deny_agent: str, deny_times: int = 1) -> None:
+        super().__init__()
+        self._deny_agent = deny_agent
+        self._remaining_denials = deny_times
+
+    def authorize_call(
+        self,
+        *,
+        agent_name: str,
+        estimated_prompt_tokens: int,
+        estimated_output_tokens: int,
+    ) -> Any:
+        if agent_name == self._deny_agent and self._remaining_denials > 0:
+            self._remaining_denials -= 1
+            raise CostGuardDenied(
+                level="L1",
+                limit_kind="prompt_tokens",
+                observed=9_999,
+                limit=100,
+                agent_name=agent_name,
+            )
+        return super().authorize_call(
+            agent_name=agent_name,
+            estimated_prompt_tokens=estimated_prompt_tokens,
+            estimated_output_tokens=estimated_output_tokens,
+        )
+
+
+@pytest.fixture
+def stub_runner_for_replan(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Audience 首次被拒 → 重规划成功场景。
+
+    Runner.run 会被调用 4 次:
+    - 尝试 1:orchestrator → plan(audience 调用前被 Cost Guard 拦下,Runner 不触发)
+    - 尝试 2:orchestrator → plan、audience → segment、creative → variant
+    """
+    queue: list[Any] = [_plan(), _plan(), _segment(), _variant()]
+    calls: list[Any] = []
+
+    async def fake_run(agent: Any, input_: Any, **kwargs: Any) -> _StubRunResult:
+        calls.append((agent.name, input_))
+        return _StubRunResult(queue.pop(0))
+
+    monkeypatch.setattr("auto_marketing_agent.agents.coordinator.Runner.run", fake_run)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_run_campaign_replans_once_when_audience_denied(
+    stub_runner_for_replan: list[Any],
+) -> None:
+    from auto_marketing_agent.agents.audience import build_audience_agent
+    from auto_marketing_agent.agents.creative import build_creative_agent
+    from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
+
+    agents = CampaignAgents(
+        orchestrator=build_orchestrator_agent(model="stub"),
+        audience=build_audience_agent(model="stub"),
+        creative=build_creative_agent(model="stub"),
+    )
+    guard = _DenyAgentFirstTimesCostGuard(deny_agent="audience-agent", deny_times=1)
+
+    result = await run_campaign(
+        brief="初始 brief",
+        correlation_id=CORRELATION,
+        agents=agents,
+        cost_guard=guard,
+    )
+
+    # 成功返回,说明第二次尝试通过
+    assert result.plan.campaign_id == CAMPAIGN_ID
+    # Runner 一共被调用 4 次:orch(1), orch(2), audience(2), creative(2)
+    assert [name for name, _ in stub_runner_for_replan] == [
+        "orchestrator-agent",
+        "orchestrator-agent",
+        "audience-agent",
+        "creative-agent",
+    ]
+    # 第二次 orchestrator 的 brief 里必须带重规划提示,且包含原始 brief
+    second_orch_input = stub_runner_for_replan[1][1]
+    assert "初始 brief" in second_orch_input
+    assert "Cost Guard 重规划提示" in second_orch_input
+    assert "audience-agent" in second_orch_input
+
+
+@pytest.fixture
+def stub_runner_for_exhausted_replan(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Audience 连续两次被拒 —— 重规划上限耗尽后抛出。"""
+    queue: list[Any] = [_plan(), _plan()]
+    calls: list[Any] = []
+
+    async def fake_run(agent: Any, input_: Any, **kwargs: Any) -> _StubRunResult:
+        calls.append((agent.name, input_))
+        return _StubRunResult(queue.pop(0))
+
+    monkeypatch.setattr("auto_marketing_agent.agents.coordinator.Runner.run", fake_run)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_run_campaign_reraises_when_replan_budget_exhausted(
+    stub_runner_for_exhausted_replan: list[Any],
+) -> None:
+    from auto_marketing_agent.agents.audience import build_audience_agent
+    from auto_marketing_agent.agents.creative import build_creative_agent
+    from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
+
+    agents = CampaignAgents(
+        orchestrator=build_orchestrator_agent(model="stub"),
+        audience=build_audience_agent(model="stub"),
+        creative=build_creative_agent(model="stub"),
+    )
+    guard = _DenyAgentFirstTimesCostGuard(deny_agent="audience-agent", deny_times=2)
+
+    with pytest.raises(CostGuardDenied) as exc:
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=agents,
+            cost_guard=guard,
+            max_cost_replans=1,
+        )
+    assert exc.value.agent_name == "audience-agent"
+    # 两次 orchestrator 都跑了,第二次 audience 又被拒后不再重试
+    assert [name for name, _ in stub_runner_for_exhausted_replan] == [
+        "orchestrator-agent",
+        "orchestrator-agent",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_campaign_with_zero_replans_does_not_retry(
+    stub_runner: list[Any],
+) -> None:
+    from auto_marketing_agent.agents.audience import build_audience_agent
+    from auto_marketing_agent.agents.creative import build_creative_agent
+    from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
+
+    agents = CampaignAgents(
+        orchestrator=build_orchestrator_agent(model="stub"),
+        audience=build_audience_agent(model="stub"),
+        creative=build_creative_agent(model="stub"),
+    )
+    guard = _DenyAgentFirstTimesCostGuard(deny_agent="audience-agent", deny_times=1)
+
+    with pytest.raises(CostGuardDenied):
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=agents,
+            cost_guard=guard,
+            max_cost_replans=0,
+        )
+    # max_cost_replans=0 时只跑了一次 orchestrator,不进重规划
+    assert [name for name, _ in stub_runner] == ["orchestrator-agent"]
+
+
+@pytest.mark.asyncio
+async def test_run_campaign_rejects_negative_max_cost_replans(
+    stub_runner: list[Any],
+) -> None:
+    from auto_marketing_agent.agents.audience import build_audience_agent
+    from auto_marketing_agent.agents.creative import build_creative_agent
+    from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
+
+    agents = CampaignAgents(
+        orchestrator=build_orchestrator_agent(model="stub"),
+        audience=build_audience_agent(model="stub"),
+        creative=build_creative_agent(model="stub"),
+    )
+    with pytest.raises(ValueError, match="max_cost_replans"):
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=agents,
+            max_cost_replans=-1,
+        )

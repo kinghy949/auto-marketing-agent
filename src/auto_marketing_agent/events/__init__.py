@@ -10,6 +10,7 @@ P1 只实现 `InMemoryEventStore`,生产后端(`PostgresEventStore`)排 P2。coo
 """
 
 from auto_marketing_agent.events.event import Event, EventType
+from auto_marketing_agent.events.jsonl_store import JsonlEventStore
 from auto_marketing_agent.events.store import EventStore, InMemoryEventStore
 
 __all__ = [
@@ -17,4 +18,5 @@ __all__ = [
     "EventStore",
     "EventType",
     "InMemoryEventStore",
+    "JsonlEventStore",
 ]

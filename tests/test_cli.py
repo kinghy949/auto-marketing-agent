@@ -7,13 +7,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from auto_marketing_agent import __main__ as cli
 from auto_marketing_agent.agents.coordinator import CampaignRunResult
+from auto_marketing_agent.events import Event, JsonlEventStore
 from auto_marketing_agent.schemas.common import KPITarget, Money
 from auto_marketing_agent.schemas.v1.approval import ApprovalDecision
 from auto_marketing_agent.schemas.v1.audience import AudienceSegment
@@ -153,3 +155,216 @@ def test_run_subcommand_forwards_brief_and_model(captured: _CapturedArgs) -> Non
 def test_run_subcommand_requires_brief() -> None:
     with pytest.raises(SystemExit):
         cli.main(["run"])
+
+
+# ---------------------------------------------------------------------------
+# `run --events-file` —— P1-022 持久化
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def captured_with_events(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> tuple[_CapturedArgs, list[Any]]:
+    """run 时把实际传入的 event_store 截出来,让测试能对其 append。"""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-dummy")
+    captured = _CapturedArgs(brief="", correlation_id="", model="")
+    stores: list[Any] = []
+
+    def fake_build(model: str) -> Any:
+        captured.model = model
+        return object()
+
+    async def fake_run_campaign(
+        brief: str,
+        *,
+        correlation_id: str,
+        agents: Any,
+        event_store: Any = None,
+        **_: Any,
+    ) -> CampaignRunResult:
+        captured.brief = brief
+        captured.correlation_id = correlation_id
+        stores.append(event_store)
+        # 模拟 coordinator 实际 append 一条事件
+        if event_store is not None:
+            event_store.append(
+                Event(
+                    event_type="campaign.completed",
+                    source="coordinator",
+                    correlation_id=correlation_id,
+                    payload={"campaign_id": "cmp:cli:202604"},
+                    campaign_id="cmp:cli:202604",
+                )
+            )
+        return _fixed_result()
+
+    monkeypatch.setattr(cli, "build_default_agents", fake_build)
+    monkeypatch.setattr(cli, "run_campaign", fake_run_campaign)
+    return captured, stores
+
+
+def test_run_with_events_file_persists_jsonl(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    captured_with_events: tuple[_CapturedArgs, list[Any]],
+) -> None:
+    events_path = tmp_path / "events.jsonl"
+    exit_code = cli.main(
+        [
+            "run",
+            "--brief",
+            "x",
+            "--correlation-id",
+            "corr:persist",
+            "--events-file",
+            str(events_path),
+        ]
+    )
+    assert exit_code == 0
+    assert events_path.exists()
+    # 从文件重新 load,应能看到那条 campaign.completed
+    loaded = JsonlEventStore(path=events_path).list_all()
+    assert len(loaded) == 1
+    assert loaded[0].event_type == "campaign.completed"
+    # stdout 输出里 event_count=1
+    out = capsys.readouterr().out
+    assert json.loads(out)["event_count"] == 1
+
+
+def test_run_without_events_file_does_not_create_any(
+    tmp_path: Path,
+    captured_with_events: tuple[_CapturedArgs, list[Any]],
+) -> None:
+    # 不传 --events-file:不应在 cwd 或 tmp 造文件
+    cli.main(["run", "--brief", "x", "--correlation-id", "corr:mem"])
+    # 工作目录里没有 events.jsonl 这种默认名(保证 CLI 不暗写)
+    assert not (tmp_path / "events.jsonl").exists()
+
+
+# ---------------------------------------------------------------------------
+# `events replay` —— P1-022
+# ---------------------------------------------------------------------------
+
+
+def _make_events_file(path: Path) -> None:
+    """写一个小的 JSONL 固定事件文件,三条事件跨两个 campaign。"""
+    store = JsonlEventStore(path=path)
+    t0 = datetime(2026, 4, 22, 10, 0, 0, tzinfo=timezone.utc)
+    from dataclasses import replace
+
+    def evt(
+        i: int, *, event_type: str, correlation_id: str, campaign_id: str | None
+    ) -> Event:
+        base = Event(
+            event_type=event_type,  # type: ignore[arg-type]
+            source="coordinator",
+            correlation_id=correlation_id,
+            payload={"i": i},
+            campaign_id=campaign_id,
+        )
+        return replace(base, occurred_at=t0.replace(hour=10 + i))
+
+    store.append(
+        evt(0, event_type="cost_guard.authorized", correlation_id="corr:A", campaign_id="cmp:A")
+    )
+    store.append(
+        evt(1, event_type="guardrail.evaluated", correlation_id="corr:A", campaign_id="cmp:A")
+    )
+    store.append(
+        evt(2, event_type="cost_guard.authorized", correlation_id="corr:B", campaign_id="cmp:B")
+    )
+
+
+def test_events_replay_dumps_all_lines_by_default(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "events.jsonl"
+    _make_events_file(path)
+    exit_code = cli.main(["events", "replay", "--events-file", str(path)])
+    assert exit_code == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 3
+    # 按 occurred_at 升序,第一条 payload.i == 0
+    assert json.loads(lines[0])["payload"]["i"] == 0
+    assert json.loads(lines[2])["payload"]["i"] == 2
+
+
+def test_events_replay_filters_by_campaign_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "events.jsonl"
+    _make_events_file(path)
+    cli.main(["events", "replay", "--events-file", str(path), "--campaign-id", "cmp:A"])
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 2
+    assert all(json.loads(line)["campaign_id"] == "cmp:A" for line in lines)
+
+
+def test_events_replay_filters_by_event_type(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "events.jsonl"
+    _make_events_file(path)
+    cli.main(
+        [
+            "events",
+            "replay",
+            "--events-file",
+            str(path),
+            "--event-type",
+            "guardrail.evaluated",
+        ]
+    )
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["event_type"] == "guardrail.evaluated"
+
+
+def test_events_replay_filters_by_time_range(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "events.jsonl"
+    _make_events_file(path)
+    # [11:00, 13:00) 应该只拿到 i=1 的那条(11:00)
+    cli.main(
+        [
+            "events",
+            "replay",
+            "--events-file",
+            str(path),
+            "--since",
+            "2026-04-22T11:00:00+00:00",
+            "--until",
+            "2026-04-22T12:00:00+00:00",
+        ]
+    )
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["payload"]["i"] == 1
+
+
+def test_events_replay_missing_file_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "nope.jsonl"
+    exit_code = cli.main(["events", "replay", "--events-file", str(missing)])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "不存在" in err
+
+
+def test_events_replay_rejects_naive_since(tmp_path: Path) -> None:
+    path = tmp_path / "events.jsonl"
+    _make_events_file(path)
+    with pytest.raises(SystemExit, match="tz-aware"):
+        cli.main(
+            [
+                "events",
+                "replay",
+                "--events-file",
+                str(path),
+                "--since",
+                "2026-04-22T00:00:00",
+            ]
+        )

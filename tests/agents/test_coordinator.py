@@ -21,6 +21,7 @@ from auto_marketing_agent.agents.coordinator import (
     run_campaign,
 )
 from auto_marketing_agent.cost_guard import CostGuard, CostGuardConfig, CostGuardDenied
+from auto_marketing_agent.hitl import InMemoryHitlQueue
 from auto_marketing_agent.schemas.common import KPITarget, Money
 from auto_marketing_agent.schemas.v1.approval import ApprovalDecision
 from auto_marketing_agent.schemas.v1.audience import AudienceSegment
@@ -256,6 +257,104 @@ async def test_run_campaign_raises_creative_rejected_when_guardrail_rejects(
 
     assert exc.value.decision.decision == "reject"
     assert "cn_ad_law:absolute_superlatives" in exc.value.decision.violations
+
+
+@pytest.fixture
+def stub_runner_with_hitl_variant(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Creative 输出含疑似医疗宣称,触发 Guardrail needs_hitl。"""
+    queue: list[Any] = [
+        _plan(),
+        _segment(),
+        _variant(body="使用三天即可根治,无副作用"),  # cn_ad_law:unapproved_medical_claims
+    ]
+    calls: list[Any] = []
+
+    async def fake_run(agent: Any, input_: Any, **kwargs: Any) -> _StubRunResult:
+        calls.append((agent.name, input_))
+        return _StubRunResult(queue.pop(0))
+
+    monkeypatch.setattr("auto_marketing_agent.agents.coordinator.Runner.run", fake_run)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_run_campaign_enqueues_hitl_when_decision_is_needs_hitl(
+    stub_runner_with_hitl_variant: list[Any],
+) -> None:
+    from auto_marketing_agent.agents.audience import build_audience_agent
+    from auto_marketing_agent.agents.creative import build_creative_agent
+    from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
+
+    agents = CampaignAgents(
+        orchestrator=build_orchestrator_agent(model="stub"),
+        audience=build_audience_agent(model="stub"),
+        creative=build_creative_agent(model="stub"),
+    )
+    queue = InMemoryHitlQueue()
+
+    result = await run_campaign(
+        brief="x",
+        correlation_id=CORRELATION,
+        agents=agents,
+        hitl_queue=queue,
+    )
+
+    assert result.approval.decision == "needs_hitl"
+    assert result.hitl_item is not None
+    assert result.hitl_item.status == "pending"
+    assert result.hitl_item.approval.approval_id == result.approval.approval_id
+    assert "禁用赌博" in result.hitl_item.brand_guardrails
+    # 队列里也能查到同一条
+    pending = queue.list_pending()
+    assert len(pending) == 1
+    assert pending[0].item_id == result.hitl_item.item_id
+
+
+@pytest.mark.asyncio
+async def test_run_campaign_returns_no_hitl_item_when_approve(
+    stub_runner: list[Any],
+) -> None:
+    from auto_marketing_agent.agents.audience import build_audience_agent
+    from auto_marketing_agent.agents.creative import build_creative_agent
+    from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
+
+    agents = CampaignAgents(
+        orchestrator=build_orchestrator_agent(model="stub"),
+        audience=build_audience_agent(model="stub"),
+        creative=build_creative_agent(model="stub"),
+    )
+    queue = InMemoryHitlQueue()
+
+    result = await run_campaign(
+        brief="x",
+        correlation_id=CORRELATION,
+        agents=agents,
+        hitl_queue=queue,
+    )
+
+    assert result.approval.decision == "approve"
+    assert result.hitl_item is None
+    assert queue.list_pending() == []
+
+
+@pytest.mark.asyncio
+async def test_run_campaign_without_hitl_queue_still_returns_approval(
+    stub_runner_with_hitl_variant: list[Any],
+) -> None:
+    from auto_marketing_agent.agents.audience import build_audience_agent
+    from auto_marketing_agent.agents.creative import build_creative_agent
+    from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
+
+    agents = CampaignAgents(
+        orchestrator=build_orchestrator_agent(model="stub"),
+        audience=build_audience_agent(model="stub"),
+        creative=build_creative_agent(model="stub"),
+    )
+
+    result = await run_campaign(brief="x", correlation_id=CORRELATION, agents=agents)
+
+    assert result.approval.decision == "needs_hitl"
+    assert result.hitl_item is None
 
 
 @pytest.mark.asyncio

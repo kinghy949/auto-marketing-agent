@@ -130,7 +130,7 @@
 | P1-050 | 品牌词典加载与匹配规则 | ✅ | P0-001 | `guardrail.rules.BrandDictionary`,字面量匹配 IGNORECASE |
 | P1-051 | 广告法规则库(中国 + 欧盟基础规则) | ✅ | P0-001 | 4 条默认规则,`guardrail.engine.GuardrailEngine` 融合决策 |
 | P1-052 | Guardrail Agent:审查 `CreativeVariant` → `ApprovalDecision` | ✅ | P0-016, P1-050, P1-051 | `agents.guardrail`,决策逻辑走 engine 确定性路径 |
-| P1-053 | HITL 接入:决策结果推到人工审批队列 | ⬜ | P1-052 | |
+| P1-053 | HITL 接入:决策结果推到人工审批队列 | ✅ | P1-052 | `hitl.InMemoryHitlQueue`,coordinator 在 `needs_hitl` 时自动入队,支持 resolve / 幂等入队 |
 
 ### 部署
 
@@ -264,9 +264,9 @@
 |------|---------|--------|
 | 跨阶段 | 8 | 8 |
 | P0 | 22 | 21 |
-| P1 | 18 | 5 |
+| P1 | 18 | 6 |
 | P2 | 21 | 0 |
 | P3 | 18 | 0 |
-| **合计** | **87** | **34** |
+| **合计** | **87** | **35** |
 
 > 完成数随 commit 同步更新。

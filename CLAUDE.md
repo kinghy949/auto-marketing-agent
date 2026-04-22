@@ -33,10 +33,11 @@ P0 MVP 骨架已闭环,P1 离线部分(Cost Guard L1 / 重试装饰器 / Guardra
 - **Cost Guard L1**(`src/auto_marketing_agent/cost_guard/`):`CostGuard.authorize_call` 拦截单次调用 token 上限,已在 coordinator 每步 Runner.run 前调用
 - **通用重试装饰器**(`src/auto_marketing_agent/retry.py`):`@retry(retry_on=(...))` 指数退避 + 抖动,同步 / 异步共用
 - **Guardrail 规则引擎**(`src/auto_marketing_agent/guardrail/`):品牌词典 + 中国广告法绝对化 / 医疗 + 欧盟基础比较 / 儿童宣传 4 类规则,`evaluate_variant` 产出 ApprovalDecision
+- **HITL 内存队列**(`src/auto_marketing_agent/hitl/`):`InMemoryHitlQueue` 幂等入队 / resolve 状态机,coordinator 在 Guardrail 产出 `needs_hitl` 时自动入队,生产后端留 P2
 - **CLI**:`auto-marketing-agent run --brief "..." [--correlation-id ...] [--model ...]` 一次吐出三份 payload 的 JSON
 - **Golden cases**(`tests/golden/`):5 条 Audience + 5 条 Creative,`tests/test_golden_cases.py` 作 CI 阻塞回归
 
-未实现:Media Buyer / Attribution / Experiment 三个 agent,以及 Event Store、Circuit Breaker、Data Layer、Knowledge Store 四个平台组件,以及 DLQ / HITL 队列 / Cost Guard L2-L3,全部排在 P1+。事件驱动 handoff(Attribution → Creative 回炉)留 P2。
+未实现:Media Buyer / Attribution / Experiment 三个 agent,以及 Event Store、Circuit Breaker、Data Layer、Knowledge Store 四个平台组件,以及 DLQ / HITL 持久化后端 / Cost Guard L2-L3,全部排在 P1+。事件驱动 handoff(Attribution → Creative 回炉)留 P2。
 
 技术栈决策见 [`docs/adr/0001-tech-stack.md`](docs/adr/0001-tech-stack.md);任务追踪见 [`docs/tasks.md`](docs/tasks.md)。
 

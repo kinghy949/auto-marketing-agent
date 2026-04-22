@@ -97,7 +97,7 @@ def captured(monkeypatch: pytest.MonkeyPatch) -> _CapturedArgs:
         return object()
 
     async def fake_run_campaign(
-        brief: str, *, correlation_id: str, agents: Any
+        brief: str, *, correlation_id: str, agents: Any, **_: Any
     ) -> CampaignRunResult:
         captured.brief = brief
         captured.correlation_id = correlation_id

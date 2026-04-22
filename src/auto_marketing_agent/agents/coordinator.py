@@ -28,6 +28,7 @@ from auto_marketing_agent.cost_guard import (
     estimate_prompt_tokens,
 )
 from auto_marketing_agent.guardrail import GuardrailEngine, default_engine
+from auto_marketing_agent.hitl import HitlItem, HitlQueue
 from auto_marketing_agent.schemas.v1.approval import ApprovalDecision
 from auto_marketing_agent.schemas.v1.audience import AudienceSegment
 from auto_marketing_agent.schemas.v1.campaign import CampaignPlan
@@ -72,12 +73,17 @@ class CampaignRunResult:
 
     `approval` 是 Guardrail 机审结果。approve / needs_hitl 都会返回结果,
     reject 直接抛 `CreativeRejected`,不会走到这里。
+
+    `hitl_item` 仅在 `approval.decision == "needs_hitl"` 且 caller 传入了
+    `hitl_queue` 时才非空 —— coordinator 在返回前已把工单入队,caller 拿到
+    `HitlItem` 就可以建索引 / 转交 UI,不用自己去查队列。
     """
 
     plan: CampaignPlan
     segment: AudienceSegment
     variant: CreativeVariant
     approval: ApprovalDecision
+    hitl_item: HitlItem | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +150,7 @@ async def run_campaign(
     agents: CampaignAgents,
     cost_guard: CostGuard | None = None,
     guardrail_engine: GuardrailEngine | None = None,
+    hitl_queue: HitlQueue | None = None,
 ) -> CampaignRunResult:
     """按 brief 跑完 Orchestrator → Audience → Creative → Guardrail 四步。
 
@@ -155,7 +162,8 @@ async def run_campaign(
 
     Creative 产出后立即过 Guardrail 机审 —— 确定性规则,不调 LLM,零成本。reject 直接
     抛 `CreativeRejected`,不让违规素材进入下游(未来的 Media Buyer / Event Store)。
-    needs_hitl 也放行,由 caller(P1-053 HITL 队列)决定是否阻塞投放。
+    needs_hitl 会入 `hitl_queue`(如传入),coordinator 本身不阻塞 —— 是否暂停投放
+    由 caller(Web UI / 事件消费者)依据工单状态决定。
     """
     guard = cost_guard or CostGuard()
     engine = guardrail_engine or default_engine()
@@ -206,6 +214,20 @@ async def run_campaign(
     if approval.decision == "reject":
         raise CreativeRejected(approval)
 
-    result = CampaignRunResult(plan=plan, segment=segment, variant=variant, approval=approval)
+    hitl_item: HitlItem | None = None
+    if approval.decision == "needs_hitl" and hitl_queue is not None:
+        hitl_item = hitl_queue.enqueue(
+            approval=approval,
+            variant=variant,
+            brand_guardrails=tuple(plan.brand_guardrails),
+        )
+
+    result = CampaignRunResult(
+        plan=plan,
+        segment=segment,
+        variant=variant,
+        approval=approval,
+        hitl_item=hitl_item,
+    )
     _check_consistency(result)
     return result

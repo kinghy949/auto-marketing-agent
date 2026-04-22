@@ -22,6 +22,7 @@ from auto_marketing_agent.agents.coordinator import (
     run_campaign,
 )
 from auto_marketing_agent.agents.hello import run_hello
+from auto_marketing_agent.hitl import InMemoryHitlQueue
 from auto_marketing_agent.settings import load_settings
 from auto_marketing_agent.tracing import configure_tracing
 
@@ -63,12 +64,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _dump_result(result: CampaignRunResult) -> str:
-    payload = {
+    payload: dict[str, object] = {
         "plan": json.loads(result.plan.model_dump_json()),
         "segment": json.loads(result.segment.model_dump_json()),
         "variant": json.loads(result.variant.model_dump_json()),
         "approval": json.loads(result.approval.model_dump_json()),
     }
+    if result.hitl_item is not None:
+        payload["hitl_item_id"] = result.hitl_item.item_id
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
@@ -89,11 +92,13 @@ def main(argv: list[str] | None = None) -> int:
         model = args.model or settings.openai_model
         correlation_id = args.correlation_id or f"corr:{uuid.uuid4()}"
         agents = build_default_agents(model=model)
+        hitl_queue = InMemoryHitlQueue()
         result = asyncio.run(
             run_campaign(
                 brief=args.brief,
                 correlation_id=correlation_id,
                 agents=agents,
+                hitl_queue=hitl_queue,
             )
         )
         print(_dump_result(result))

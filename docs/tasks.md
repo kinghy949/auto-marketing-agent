@@ -91,7 +91,7 @@
 
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
-| P1-001 | L1 单调用 token ceiling 拦截器 | ⬜ | P0-002 | |
+| P1-001 | L1 单调用 token ceiling 拦截器 | ✅ | P0-002 | `cost_guard.CostGuard.authorize_call`,已接入 coordinator |
 | P1-002 | L2 单 Campaign 单日 token cap | ⬜ | P1-001, P1-020 | 需 Event Store 累计 |
 | P1-003 | L3 平台层 daily LLM cost cap | ⬜ | P1-002 | |
 | P1-004 | Cost Guard 拒绝时通知 Orchestrator 重新规划 | ⬜ | P1-001 | |
@@ -109,7 +109,7 @@
 
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
-| P1-030 | 通用重试装饰器(指数退避,最多 3 次) | ⬜ | P0-001 | |
+| P1-030 | 通用重试装饰器(指数退避,最多 3 次) | ✅ | P0-001 | `auto_marketing_agent.retry.retry`,同步 / 异步均支持,`retry_on` 必传 |
 | P1-031 | DLQ 后端(Redis / PostgreSQL queue) | ⬜ | P1-020 | |
 | P1-032 | Schema 反序列化失败 → DLQ + 告警 | ⬜ | P0-017, P1-031 | |
 | P1-033 | Sandbox 崩溃 → 自动重启 + 单次重试 | ⬜ | P1-030 | |
@@ -127,9 +127,9 @@
 
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
-| P1-050 | 品牌词典加载与匹配规则 | ⬜ | P0-001 | |
-| P1-051 | 广告法规则库(中国 + 欧盟基础规则) | ⬜ | P0-001 | |
-| P1-052 | Guardrail Agent:审查 `CreativeVariant` → `ApprovalDecision` | ⬜ | P0-016, P1-050, P1-051 | |
+| P1-050 | 品牌词典加载与匹配规则 | ✅ | P0-001 | `guardrail.rules.BrandDictionary`,字面量匹配 IGNORECASE |
+| P1-051 | 广告法规则库(中国 + 欧盟基础规则) | ✅ | P0-001 | 4 条默认规则,`guardrail.engine.GuardrailEngine` 融合决策 |
+| P1-052 | Guardrail Agent:审查 `CreativeVariant` → `ApprovalDecision` | ✅ | P0-016, P1-050, P1-051 | `agents.guardrail`,决策逻辑走 engine 确定性路径 |
 | P1-053 | HITL 接入:决策结果推到人工审批队列 | ⬜ | P1-052 | |
 
 ### 部署
@@ -264,9 +264,9 @@
 |------|---------|--------|
 | 跨阶段 | 8 | 8 |
 | P0 | 22 | 21 |
-| P1 | 18 | 0 |
+| P1 | 18 | 5 |
 | P2 | 21 | 0 |
 | P3 | 18 | 0 |
-| **合计** | **87** | **29** |
+| **合计** | **87** | **34** |
 
 > 完成数随 commit 同步更新。

@@ -19,6 +19,7 @@ from auto_marketing_agent.agents.coordinator import (
     _check_consistency,
     run_campaign,
 )
+from auto_marketing_agent.cost_guard import CostGuard, CostGuardConfig, CostGuardDenied
 from auto_marketing_agent.schemas.common import KPITarget, Money
 from auto_marketing_agent.schemas.v1.audience import AudienceSegment
 from auto_marketing_agent.schemas.v1.campaign import CampaignPlan
@@ -190,3 +191,33 @@ def test_consistency_check_catches_correlation_id_mismatch() -> None:
     )
     with pytest.raises(ValueError, match="correlation_id"):
         _check_consistency(bad)
+
+
+@pytest.mark.asyncio
+async def test_run_campaign_raises_when_cost_guard_denies(
+    stub_runner: list[Any],
+) -> None:
+    # 用一个比任何 agent 都激进的上限,保证第一次 authorize_call 就拒
+    strict_guard = CostGuard(CostGuardConfig(1, 1, 1))
+
+    from auto_marketing_agent.agents.audience import build_audience_agent
+    from auto_marketing_agent.agents.creative import build_creative_agent
+    from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
+
+    agents = CampaignAgents(
+        orchestrator=build_orchestrator_agent(model="stub"),
+        audience=build_audience_agent(model="stub"),
+        creative=build_creative_agent(model="stub"),
+    )
+
+    with pytest.raises(CostGuardDenied) as exc:
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=agents,
+            cost_guard=strict_guard,
+        )
+    # 第一步 orchestrator 就被拒
+    assert exc.value.agent_name == "orchestrator-agent"
+    # 被拒前 Runner.run 不应被调用
+    assert stub_runner == []

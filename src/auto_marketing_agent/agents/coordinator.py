@@ -16,15 +16,30 @@ SDK handoff):
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from agents import Agent, Runner
 from auto_marketing_agent.agents.audience import build_audience_agent
 from auto_marketing_agent.agents.creative import build_creative_agent
 from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
+from auto_marketing_agent.cost_guard import (
+    CostGuard,
+    CostGuardDecision,
+    estimate_prompt_tokens,
+)
 from auto_marketing_agent.schemas.v1.audience import AudienceSegment
 from auto_marketing_agent.schemas.v1.campaign import CampaignPlan
 from auto_marketing_agent.schemas.v1.creative import CreativeVariant
 from auto_marketing_agent.tracing import campaign_trace
+
+# 不同 agent 产出长度差异大,给 output_tokens 估算留一个档位表。L2 接入真实 tokenizer
+# 后会按 model + schema 反推;P1-001 先用静态预估即可。
+_ESTIMATED_OUTPUT_TOKENS: dict[str, int] = {
+    "orchestrator-agent": 400,
+    "audience-agent": 400,
+    "creative-agent": 800,
+}
+_DEFAULT_OUTPUT_TOKENS = 400
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,19 +94,53 @@ def _check_consistency(result: CampaignRunResult) -> None:
         raise ValueError(f"correlation_id 在三份 payload 间不一致: {correlation_ids}")
 
 
+async def _authorized_run(
+    *,
+    agent: Agent[None],
+    prompt: str,
+    cost_guard: CostGuard,
+    decisions: list[CostGuardDecision],
+) -> Any:
+    """调 Cost Guard L1 放行后再跑 Runner。
+
+    拒绝时 `CostGuardDenied` 直接向上抛,由 caller(run_campaign / 未来的 HITL 流)决定
+    是否重试。放行 decision 追加进 `decisions`,供 P1-021 Event Store 整批 flush。
+    """
+    output_budget = _ESTIMATED_OUTPUT_TOKENS.get(agent.name, _DEFAULT_OUTPUT_TOKENS)
+    decision = cost_guard.authorize_call(
+        agent_name=agent.name,
+        estimated_prompt_tokens=estimate_prompt_tokens(prompt),
+        estimated_output_tokens=output_budget,
+    )
+    decisions.append(decision)
+    return await Runner.run(agent, prompt)
+
+
 async def run_campaign(
     brief: str,
     *,
     correlation_id: str,
     agents: CampaignAgents,
+    cost_guard: CostGuard | None = None,
 ) -> CampaignRunResult:
     """按 brief 跑完 Orchestrator → Audience → Creative 三步。
 
     `correlation_id` 由上游(CLI / event bus)传入,sender 负责去重。`campaign_id` 由
     Orchestrator agent 自己决定并写进 CampaignPlan,coordinator 不干预。
+
+    每次 Runner.run 前过 Cost Guard L1(CLAUDE.md 硬约束:每次 LLM 调用前必须过)。
+    `cost_guard=None` 时用默认保守配置;传入自定义 guard 可以做更严苛的上限。
     """
+    guard = cost_guard or CostGuard()
+    decisions: list[CostGuardDecision] = []
+
     orch_input = f"correlation_id={correlation_id}\n\nbrief:\n{brief}"
-    plan_run = await Runner.run(agents.orchestrator, orch_input)
+    plan_run = await _authorized_run(
+        agent=agents.orchestrator,
+        prompt=orch_input,
+        cost_guard=guard,
+        decisions=decisions,
+    )
     plan = plan_run.final_output_as(CampaignPlan)
 
     with campaign_trace(campaign_id=plan.campaign_id, phase="plan"):
@@ -100,7 +149,12 @@ async def run_campaign(
             f"campaign_id={plan.campaign_id}\n\n"
             f"CampaignPlan JSON:\n{plan.model_dump_json()}"
         )
-        segment_run = await Runner.run(agents.audience, audience_input)
+        segment_run = await _authorized_run(
+            agent=agents.audience,
+            prompt=audience_input,
+            cost_guard=guard,
+            decisions=decisions,
+        )
         segment = segment_run.final_output_as(AudienceSegment)
 
         creative_input = (
@@ -109,7 +163,12 @@ async def run_campaign(
             f"CampaignPlan JSON:\n{plan.model_dump_json()}\n\n"
             f"AudienceSegment JSON:\n{segment.model_dump_json()}"
         )
-        variant_run = await Runner.run(agents.creative, creative_input)
+        variant_run = await _authorized_run(
+            agent=agents.creative,
+            prompt=creative_input,
+            cost_guard=guard,
+            decisions=decisions,
+        )
         variant = variant_run.final_output_as(CreativeVariant)
 
     result = CampaignRunResult(plan=plan, segment=segment, variant=variant)

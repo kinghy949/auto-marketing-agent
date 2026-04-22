@@ -27,10 +27,27 @@ from auto_marketing_agent.cost_guard import (
     CostGuardDecision,
     estimate_prompt_tokens,
 )
+from auto_marketing_agent.guardrail import GuardrailEngine, default_engine
+from auto_marketing_agent.schemas.v1.approval import ApprovalDecision
 from auto_marketing_agent.schemas.v1.audience import AudienceSegment
 from auto_marketing_agent.schemas.v1.campaign import CampaignPlan
 from auto_marketing_agent.schemas.v1.creative import CreativeVariant
 from auto_marketing_agent.tracing import campaign_trace
+
+
+class CreativeRejected(RuntimeError):
+    """Guardrail 机审 reject 时抛出。
+
+    和 `CostGuardDenied` 的定位一致:这是业务拒绝,不可重试 —— 上游必须让 Creative
+    用 `modification_suggestions` 重新生成,或走 HITL 流人工覆盖。
+    """
+
+    def __init__(self, decision: ApprovalDecision) -> None:
+        super().__init__(
+            f"CreativeVariant {decision.subject_id} 机审 reject: violations={decision.violations}"
+        )
+        self.decision = decision
+
 
 # 不同 agent 产出长度差异大,给 output_tokens 估算留一个档位表。L2 接入真实 tokenizer
 # 后会按 model + schema 反推;P1-001 先用静态预估即可。
@@ -52,11 +69,15 @@ class CampaignRunResult:
 
     这些一致性由 coordinator 负责保证,agent 的 instructions 只提要求,
     coordinator 在组装完成后会再做一次断言(`_check_consistency`)。
+
+    `approval` 是 Guardrail 机审结果。approve / needs_hitl 都会返回结果,
+    reject 直接抛 `CreativeRejected`,不会走到这里。
     """
 
     plan: CampaignPlan
     segment: AudienceSegment
     variant: CreativeVariant
+    approval: ApprovalDecision
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,16 +143,22 @@ async def run_campaign(
     correlation_id: str,
     agents: CampaignAgents,
     cost_guard: CostGuard | None = None,
+    guardrail_engine: GuardrailEngine | None = None,
 ) -> CampaignRunResult:
-    """按 brief 跑完 Orchestrator → Audience → Creative 三步。
+    """按 brief 跑完 Orchestrator → Audience → Creative → Guardrail 四步。
 
     `correlation_id` 由上游(CLI / event bus)传入,sender 负责去重。`campaign_id` 由
     Orchestrator agent 自己决定并写进 CampaignPlan,coordinator 不干预。
 
     每次 Runner.run 前过 Cost Guard L1(CLAUDE.md 硬约束:每次 LLM 调用前必须过)。
     `cost_guard=None` 时用默认保守配置;传入自定义 guard 可以做更严苛的上限。
+
+    Creative 产出后立即过 Guardrail 机审 —— 确定性规则,不调 LLM,零成本。reject 直接
+    抛 `CreativeRejected`,不让违规素材进入下游(未来的 Media Buyer / Event Store)。
+    needs_hitl 也放行,由 caller(P1-053 HITL 队列)决定是否阻塞投放。
     """
     guard = cost_guard or CostGuard()
+    engine = guardrail_engine or default_engine()
     decisions: list[CostGuardDecision] = []
 
     orch_input = f"correlation_id={correlation_id}\n\nbrief:\n{brief}"
@@ -171,6 +198,14 @@ async def run_campaign(
         )
         variant = variant_run.final_output_as(CreativeVariant)
 
-    result = CampaignRunResult(plan=plan, segment=segment, variant=variant)
+    approval = engine.evaluate_variant(
+        variant,
+        brand_guardrails=list(plan.brand_guardrails),
+        correlation_id=correlation_id,
+    )
+    if approval.decision == "reject":
+        raise CreativeRejected(approval)
+
+    result = CampaignRunResult(plan=plan, segment=segment, variant=variant, approval=approval)
     _check_consistency(result)
     return result

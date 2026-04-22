@@ -15,6 +15,7 @@ import pytest
 from auto_marketing_agent import __main__ as cli
 from auto_marketing_agent.agents.coordinator import CampaignRunResult
 from auto_marketing_agent.schemas.common import KPITarget, Money
+from auto_marketing_agent.schemas.v1.approval import ApprovalDecision
 from auto_marketing_agent.schemas.v1.audience import AudienceSegment
 from auto_marketing_agent.schemas.v1.campaign import CampaignPlan
 from auto_marketing_agent.schemas.v1.creative import (
@@ -73,7 +74,16 @@ def _fixed_result() -> CampaignRunResult:
         ],
         generated_by="creative-agent/gpt-4.1-mini",
     )
-    return CampaignRunResult(plan=plan, segment=segment, variant=variant)
+    approval = ApprovalDecision(
+        correlation_id="corr:cli-test",
+        approval_id="apv:var:cli:main:stub",
+        campaign_id="cmp:cli:202604",
+        subject_type="creative_variant",
+        subject_id="var:cli:main",
+        decision="approve",
+        rationale="unit stub",
+    )
+    return CampaignRunResult(plan=plan, segment=segment, variant=variant, approval=approval)
 
 
 @pytest.fixture
@@ -115,9 +125,10 @@ def test_run_subcommand_prints_three_payloads_as_json(
     assert exit_code == 0
     out = capsys.readouterr().out
     payload = json.loads(out)
-    assert set(payload.keys()) == {"plan", "segment", "variant"}
+    assert set(payload.keys()) == {"plan", "segment", "variant", "approval"}
     assert payload["plan"]["campaign_id"] == "cmp:cli:202604"
     assert payload["variant"]["target_segment_id"] == payload["segment"]["segment_id"]
+    assert payload["approval"]["decision"] == "approve"
 
 
 def test_run_subcommand_generates_correlation_id_when_missing(

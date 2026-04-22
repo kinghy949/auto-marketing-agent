@@ -16,11 +16,13 @@ import pytest
 from auto_marketing_agent.agents import coordinator as coordinator_mod
 from auto_marketing_agent.agents.coordinator import (
     CampaignAgents,
+    CreativeRejected,
     _check_consistency,
     run_campaign,
 )
 from auto_marketing_agent.cost_guard import CostGuard, CostGuardConfig, CostGuardDenied
 from auto_marketing_agent.schemas.common import KPITarget, Money
+from auto_marketing_agent.schemas.v1.approval import ApprovalDecision
 from auto_marketing_agent.schemas.v1.audience import AudienceSegment
 from auto_marketing_agent.schemas.v1.campaign import CampaignPlan
 from auto_marketing_agent.schemas.v1.creative import (
@@ -62,14 +64,19 @@ def _segment() -> AudienceSegment:
     )
 
 
-def _variant(target_segment_id: str = "aud:unit:main") -> CreativeVariant:
+def _variant(
+    target_segment_id: str = "aud:unit:main",
+    *,
+    headline: str = "测试标题",
+    body: str = "测试正文",
+) -> CreativeVariant:
     return CreativeVariant(
         correlation_id=CORRELATION,
         variant_id="var:unit:main",
         campaign_id=CAMPAIGN_ID,
         target_segment_id=target_segment_id,
-        headline="测试标题",
-        body="测试正文",
+        headline=headline,
+        body=body,
         call_to_action="立即购买",
         language="en-US",
         assets=[
@@ -81,6 +88,19 @@ def _variant(target_segment_id: str = "aud:unit:main") -> CreativeVariant:
             )
         ],
         generated_by="creative-agent/gpt-4.1-mini",
+    )
+
+
+def _approval(decision: str = "approve") -> ApprovalDecision:
+    return ApprovalDecision(
+        correlation_id=CORRELATION,
+        approval_id="apv:var:unit:main:deadbeef",
+        campaign_id=CAMPAIGN_ID,
+        subject_type="creative_variant",
+        subject_id="var:unit:main",
+        decision=decision,
+        rationale="unit stub",
+        violations=["stub:rule"] if decision == "reject" else [],
     )
 
 
@@ -134,6 +154,9 @@ async def test_run_campaign_chains_three_agents_in_order(stub_runner: list[Any])
     assert result.plan.campaign_id == CAMPAIGN_ID
     assert result.segment.campaign_id == CAMPAIGN_ID
     assert result.variant.target_segment_id == result.segment.segment_id
+    # 默认 stub variant 文本干净,机审应 approve
+    assert result.approval.decision == "approve"
+    assert result.approval.subject_id == result.variant.variant_id
 
 
 @pytest.mark.asyncio
@@ -168,6 +191,7 @@ def test_consistency_check_catches_campaign_id_mismatch() -> None:
         plan=_plan(),
         segment=_segment().model_copy(update={"campaign_id": "other-id"}),
         variant=_variant(),
+        approval=_approval(),
     )
     with pytest.raises(ValueError, match="campaign_id"):
         _check_consistency(bad)
@@ -178,6 +202,7 @@ def test_consistency_check_catches_target_segment_mismatch() -> None:
         plan=_plan(),
         segment=_segment(),
         variant=_variant(target_segment_id="aud:wrong"),
+        approval=_approval(),
     )
     with pytest.raises(ValueError, match="target_segment_id"):
         _check_consistency(bad)
@@ -188,9 +213,49 @@ def test_consistency_check_catches_correlation_id_mismatch() -> None:
         plan=_plan(),
         segment=_segment().model_copy(update={"correlation_id": "other-corr"}),
         variant=_variant(),
+        approval=_approval(),
     )
     with pytest.raises(ValueError, match="correlation_id"):
         _check_consistency(bad)
+
+
+@pytest.fixture
+def stub_runner_with_reject_variant(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Creative 输出含绝对化用语,触发 Guardrail reject。"""
+    queue: list[Any] = [
+        _plan(),
+        _segment(),
+        _variant(headline="顶级国家级享受"),  # 两处命中 cn_ad_law:absolute_superlatives
+    ]
+    calls: list[Any] = []
+
+    async def fake_run(agent: Any, input_: Any, **kwargs: Any) -> _StubRunResult:
+        calls.append((agent.name, input_))
+        return _StubRunResult(queue.pop(0))
+
+    monkeypatch.setattr("auto_marketing_agent.agents.coordinator.Runner.run", fake_run)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_run_campaign_raises_creative_rejected_when_guardrail_rejects(
+    stub_runner_with_reject_variant: list[Any],
+) -> None:
+    from auto_marketing_agent.agents.audience import build_audience_agent
+    from auto_marketing_agent.agents.creative import build_creative_agent
+    from auto_marketing_agent.agents.orchestrator import build_orchestrator_agent
+
+    agents = CampaignAgents(
+        orchestrator=build_orchestrator_agent(model="stub"),
+        audience=build_audience_agent(model="stub"),
+        creative=build_creative_agent(model="stub"),
+    )
+
+    with pytest.raises(CreativeRejected) as exc:
+        await run_campaign(brief="x", correlation_id=CORRELATION, agents=agents)
+
+    assert exc.value.decision.decision == "reject"
+    assert "cn_ad_law:absolute_superlatives" in exc.value.decision.violations
 
 
 @pytest.mark.asyncio

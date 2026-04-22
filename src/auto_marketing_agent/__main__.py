@@ -67,6 +67,7 @@ def _dump_result(result: CampaignRunResult) -> str:
         "plan": json.loads(result.plan.model_dump_json()),
         "segment": json.loads(result.segment.model_dump_json()),
         "variant": json.loads(result.variant.model_dump_json()),
+        "approval": json.loads(result.approval.model_dump_json()),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 

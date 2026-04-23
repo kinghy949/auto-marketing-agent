@@ -38,13 +38,13 @@ P0 MVP 骨架已闭环,P1 离线部分(Cost Guard L1 / 重试装饰器 / Guardra
 - **通用重试装饰器**(`src/auto_marketing_agent/retry.py`):`@retry(retry_on=(...))` 指数退避 + 抖动,同步 / 异步共用
 - **Guardrail 规则引擎**(`src/auto_marketing_agent/guardrail/`):品牌词典 + 中国广告法绝对化 / 医疗 + 欧盟基础比较 / 儿童宣传 4 类规则,`evaluate_variant` 产出 ApprovalDecision
 - **HITL 内存队列**(`src/auto_marketing_agent/hitl/`):`InMemoryHitlQueue` 幂等入队 / resolve 状态机,coordinator 在 Guardrail 产出 `needs_hitl` 时自动入队,生产后端留 P2
-- **Event Store**(`src/auto_marketing_agent/events/` + `migrations/001_events.sql`):`EventStore` Protocol + `InMemoryEventStore` / `JsonlEventStore`(append-only JSONL,重放时按 occurred_at 升序),coordinator 在 cost_guard(authorized/denied)、guardrail.evaluated、creative.rejected、hitl.enqueued、cost_replan.triggered、dlq.enqueued、campaign.completed 八个位点发射事件;CLI `events replay` 支持按 campaign / correlation / event_type / time-range 组合过滤;Postgres 后端 P1-024 排 Iter 3,schema 与 ADR-0002 已定
+- **Event Store**(`src/auto_marketing_agent/events/` + `migrations/001_events.sql`):`EventStore` Protocol + 三挡后端 `InMemoryEventStore` / `JsonlEventStore`(append-only JSONL,重放时按 occurred_at 升序)/ `PostgresEventStore`(psycopg3 同步 + `ConnectionPool`,装 `pip install -e '.[postgres]'` 才进路径;DB 层 `events_reject_mutation` 触发器兜底 append-only),coordinator 在 cost_guard(authorized/denied)、guardrail.evaluated、creative.rejected、hitl.enqueued、cost_replan.triggered、dlq.enqueued、campaign.completed 八个位点发射事件;CLI `events replay` 支持按 campaign / correlation / event_type / time-range 组合过滤;本地起 Postgres 用 `docker compose up -d postgres`,集成测试由 `AMA_TEST_POSTGRES_DSN` 环境变量控流
 - **DLQ**(`src/auto_marketing_agent/dlq/`):`DlqQueue` Protocol + `InMemoryDlq`,coordinator 拦 SDK `ModelBehaviorError`(schema 反序列化失败)入队并抛 `SchemaDeserializationFailed`;resolve 状态机 pending → replayed/discarded;Postgres 后端 P1-035 排 Iter 3
 - **CLI**:`auto-marketing-agent run --brief "..." [--correlation-id ...] [--model ...]` 一次吐出三份 payload + 事件计数的 JSON
 - **Docker 化**(`Dockerfile` + `docker-compose.yml`):多阶段构建、非 root 运行、CI 里加 `docker-build` 验证 `--help`
 - **Golden cases**(`tests/golden/`):5 条 Audience + 5 条 Creative,`tests/test_golden_cases.py` 作 CI 阻塞回归
 
-未实现:Media Buyer / Attribution / Experiment 三个 agent,以及 Circuit Breaker、Data Layer、Knowledge Store 三个平台组件,以及 HITL / DLQ / Event Store 的 Postgres 持久化后端,全部排在 P1+。事件驱动 handoff(Attribution → Creative 回炉)留 P2。
+未实现:Media Buyer / Attribution / Experiment 三个 agent,以及 Circuit Breaker、Data Layer、Knowledge Store 三个平台组件,以及 HITL / DLQ 的 Postgres 持久化后端(Event Store 的已落地),全部排在 P1+。事件驱动 handoff(Attribution → Creative 回炉)留 P2。
 
 技术栈决策见 [`docs/adr/0001-tech-stack.md`](docs/adr/0001-tech-stack.md);任务追踪见 [`docs/tasks.md`](docs/tasks.md)。
 

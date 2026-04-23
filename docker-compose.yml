@@ -7,8 +7,14 @@
 #   docker compose run --rm app \
 #     run --brief "美国 18-24 运动人群 ROAS 活动"
 #
-# 生产部署走 K8s Helm(P1-061),不在这里拉 Postgres / Redis 这些依赖。
-# P1-020 落地 Event Store 时会在这个 compose 里加 postgres service。
+# Postgres 后端测试路径(Iter 3):
+#   docker compose up -d postgres
+#   export AMA_TEST_POSTGRES_DSN="postgresql://ama:ama@localhost:5432/ama"
+#   pytest tests/events/test_postgres_store.py
+# postgres service 会在首次启动时把 migrations/ 目录按字典序跑一遍
+# (Postgres 官方镜像的 /docker-entrypoint-initdb.d 约定)。
+#
+# 生产部署走 K8s Helm(P1-061),不在这里管 secret / HA。
 
 services:
   app:
@@ -20,3 +26,26 @@ services:
       - .env
     # 默认打印 --help。真实运行由 `docker compose run --rm app <子命令>` 覆盖 CMD。
     command: ["--help"]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ama
+      POSTGRES_PASSWORD: ama
+      POSTGRES_DB: ama
+    ports:
+      - "5432:5432"
+    volumes:
+      # 挂到 /docker-entrypoint-initdb.d/ —— 镜像首次初始化空 data dir 时
+      # 会按文件名字典序执行。二次启动已有 data 就不会重跑;想强制重跑
+      # 删 pgdata volume 即可。
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ama -d ama"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

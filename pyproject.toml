@@ -29,6 +29,14 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
 ]
+# Postgres 后端(P1-024 / P1-034 / P1-035)。默认不装 —— 离线测试与 InMemory
+# 路径无需 Postgres,只有 CI integration job 和生产部署需要。装法:
+#   pip install -e '.[postgres]'
+# 选 psycopg3(非 psycopg2),binary 轮子避免装机时要 libpq-dev。
+postgres = [
+    "psycopg[binary]>=3.1",
+    "psycopg-pool>=3.2",
+]
 
 [project.scripts]
 auto-marketing-agent = "auto_marketing_agent.__main__:main"
@@ -69,6 +77,12 @@ plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 module = ["agents.*"]
+ignore_missing_imports = true
+
+# psycopg 在 optional dep `postgres` 下,dev 默认不装。装了走真实类型;没装让
+# mypy 不抱怨 missing import,让离线 dev 机也能过 mypy strict。
+[[tool.mypy.overrides]]
+module = ["psycopg.*", "psycopg_pool.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

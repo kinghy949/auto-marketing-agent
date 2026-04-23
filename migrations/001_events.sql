@@ -12,8 +12,11 @@
 --
 -- 兼容性:需要 Postgres 12+(GIN jsonb_path_ops 可选,P1 不启用)。
 
+-- event_id 用 TEXT 而非 UUID:应用层生成的是 `evt:<uuid4>` 带前缀字符串
+-- (与 DLQ 的 `dlq:...`、HITL 的 `hitl:...` 同前缀规范),Postgres 层原样存。
+-- 前缀让跨表审计时一眼看出 ID 归属,值得牺牲 16 字节紧凑表示。
 CREATE TABLE IF NOT EXISTS events (
-    event_id        UUID PRIMARY KEY,
+    event_id        TEXT PRIMARY KEY,
     event_type      TEXT NOT NULL,
     source          TEXT NOT NULL,
     schema_version  TEXT NOT NULL DEFAULT 'v1',

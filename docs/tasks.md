@@ -104,7 +104,7 @@
 | P1-021 | Event 写入 SDK(每个 agent decision 一条) | ✅ | P1-020 | `events/` 包,Protocol + InMemoryEventStore;coordinator 在 8 个位点发射事件(含 `dlq.enqueued`) |
 | P1-022 | 按 `campaign_id` 重放工具 | ✅ | P1-021 | `JsonlEventStore` + `auto-marketing-agent events replay`(commit `dab85c1`) |
 | P1-023 | Event 查询 API(供调试 / 离线 eval 使用) | ✅ | P1-021 | `EventStore.list_by_time_range` / `list_by_correlation` / `list_by_campaign`,CLI replay 支持 `--event-type` / `--since` / `--until` 过滤 |
-| P1-024 | Event Store Postgres 后端(替换 InMemory 生产路径) | ⬜ | P1-020, P1-021 | Iter 3 部署阻塞项 |
+| P1-024 | Event Store Postgres 后端(替换 InMemory 生产路径) | ✅ | P1-020, P1-021 | `events/postgres_store.py` + `psycopg[binary]` 可选依赖 + `docker-compose postgres` 服务;集成测试由 `AMA_TEST_POSTGRES_DSN` 控流 |
 
 ### 错误处理 / 重试 / DLQ
 
@@ -267,10 +267,10 @@
 |------|---------|--------|
 | 跨阶段 | 8 | 8 |
 | P0 | 22 | 21 |
-| P1 | 21 | 16 |
+| P1 | 21 | 17 |
 | P2 | 21 | 0 |
 | P3 | 18 | 0 |
-| **合计** | **90** | **45** |
+| **合计** | **90** | **46** |
 
 > 完成数随 commit 同步更新。
 
@@ -296,7 +296,7 @@
 
 解锁:装得出去给客户试跑。
 
-- P1-024、P1-034、P1-035、P1-003 ✅、P1-061、P1-062
+- P1-024 ✅、P1-034、P1-035、P1-003 ✅、P1-061、P1-062
 
 ### Iter 4 —— 自治基础设施(3–4 周)
 

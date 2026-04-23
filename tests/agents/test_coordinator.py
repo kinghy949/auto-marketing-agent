@@ -28,6 +28,8 @@ from auto_marketing_agent.cost_guard import (
     CostGuardDenied,
     DailyCostConfig,
     DailyCostGuard,
+    PlatformDailyCostConfig,
+    PlatformDailyCostGuard,
 )
 from auto_marketing_agent.dlq import InMemoryDlq
 from auto_marketing_agent.events import InMemoryEventStore
@@ -1020,6 +1022,125 @@ async def test_daily_cost_guard_does_not_emit_authorized_when_l2_denies(
     authorized = [e for e in store.list_all() if e.event_type == "cost_guard.authorized"]
     # 只有 orchestrator + audience 应写 authorized,creative 在 L2 拦截处抛,
     # 不应有第三条 authorized。
+    assert [e.payload["agent_name"] for e in authorized] == [
+        "orchestrator-agent",
+        "audience-agent",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# P1-003 Cost Guard L3 —— 平台单日累计拦截
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_platform_cost_guard_happy_path_same_event_order_as_no_l3(
+    stub_runner: list[Any],
+) -> None:
+    """默认预算(500k)下 L3 不拦截,事件序列与不带 L3 的情况一致。"""
+    store = InMemoryEventStore()
+    platform = PlatformDailyCostGuard(event_store=store)
+
+    await run_campaign(
+        brief="x",
+        correlation_id=CORRELATION,
+        agents=_build_default_agents(),
+        event_store=store,
+        platform_cost_guard=platform,
+    )
+
+    types = [e.event_type for e in store.list_all()]
+    assert types == [
+        "cost_guard.authorized",
+        "cost_guard.authorized",
+        "cost_guard.authorized",
+        "guardrail.evaluated",
+        "campaign.completed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_platform_cost_guard_denies_on_creative_and_does_not_replan(
+    stub_runner: list[Any],
+) -> None:
+    """L3 在 Creative 阶段爆:Orch(409)+ Audience(539)= 948 已写 authorized,
+    Creative planned 1048,948 + 1048 = 1996 > limit 1500。L3 不允许重规划
+    (与 L2 同理,压 brief 救不回累计额度),应直接抛。
+    """
+    store = InMemoryEventStore()
+    platform = PlatformDailyCostGuard(
+        event_store=store,
+        config=PlatformDailyCostConfig(max_tokens_per_day=1_500),
+    )
+
+    with pytest.raises(CostGuardDenied) as exc:
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            event_store=store,
+            platform_cost_guard=platform,
+            max_cost_replans=3,
+        )
+
+    assert exc.value.level == "L3"
+    assert exc.value.limit_kind == "platform_daily_tokens"
+    assert exc.value.agent_name == "creative-agent"
+    # Creative 在 L3 处抛,Runner.run 未进;stub 只记录 orch + audience。
+    agent_calls = [name for name, _ in stub_runner]
+    assert agent_calls == ["orchestrator-agent", "audience-agent"]
+
+
+@pytest.mark.asyncio
+async def test_platform_cost_guard_emits_denied_event_with_level_l3(
+    stub_runner: list[Any],
+) -> None:
+    store = InMemoryEventStore()
+    platform = PlatformDailyCostGuard(
+        event_store=store,
+        config=PlatformDailyCostConfig(max_tokens_per_day=1_500),
+    )
+
+    with pytest.raises(CostGuardDenied):
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            event_store=store,
+            platform_cost_guard=platform,
+        )
+
+    denied = [e for e in store.list_all() if e.event_type == "cost_guard.denied"]
+    assert len(denied) == 1
+    assert denied[0].payload["level"] == "L3"
+    assert denied[0].payload["limit_kind"] == "platform_daily_tokens"
+    assert denied[0].payload["agent_name"] == "creative-agent"
+    assert denied[0].campaign_id == CAMPAIGN_ID
+
+
+@pytest.mark.asyncio
+async def test_platform_cost_guard_does_not_emit_authorized_when_l3_denies(
+    stub_runner: list[Any],
+) -> None:
+    """L1/L2 过、L3 拒 的调用不得写入 cost_guard.authorized —— 否则下次
+    聚合会把没跑成的调用算进平台预算,形成和 L2 相同的滚雪球误拦。
+    """
+    store = InMemoryEventStore()
+    platform = PlatformDailyCostGuard(
+        event_store=store,
+        config=PlatformDailyCostConfig(max_tokens_per_day=1_500),
+    )
+
+    with pytest.raises(CostGuardDenied):
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            event_store=store,
+            platform_cost_guard=platform,
+        )
+
+    authorized = [e for e in store.list_all() if e.event_type == "cost_guard.authorized"]
     assert [e.payload["agent_name"] for e in authorized] == [
         "orchestrator-agent",
         "audience-agent",

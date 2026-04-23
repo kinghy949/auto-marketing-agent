@@ -30,9 +30,11 @@ P0 MVP 骨架已闭环,P1 离线部分(Cost Guard L1 / 重试装饰器 / Guardra
   - Creative(`creative.py`)+ mock Asset Library(`tools/asset_library_mock.py`)
   - Guardrail(`guardrail.py`)+ 机审工具(`tools/guardrail_check.py`)
   - Coordinator(`coordinator.py`)Python 层串三段并做 correlation/campaign/segment ID 一致性校验
-- **Cost Guard L1 / L2**(`src/auto_marketing_agent/cost_guard/`):
+- **Cost Guard L1 / L2 / L3**(`src/auto_marketing_agent/cost_guard/`):
   - L1 `CostGuard.authorize_call` 拦截单次调用 token 上限,coordinator 每步 Runner.run 前先过;Audience / Creative 阶段被 L1 拒时把拒绝上下文追加到 brief 重跑一次(`max_cost_replans` 控制)
-  - L2 `DailyCostGuard.authorize_call` 聚合 Event Store 内当日 `cost_guard.authorized` 事件算单 campaign 累计 token,超上限抛 `CostGuardDenied(level="L2")`;L2 拒绝不走 brief 重规划(累计量不因缩 prompt 而下降)
+  - L2 `DailyCostGuard.authorize_call` 聚合 Event Store 内当日 `cost_guard.authorized` 事件算单 campaign 累计 token,超上限抛 `CostGuardDenied(level="L2")`
+  - L3 `PlatformDailyCostGuard.authorize_call` 同源聚合但不按 campaign 过滤,包含 Orchestrator 阶段 `campaign_id=None` 的事件,守平台单日 token 总闸;coordinator 顺序 L1 → L2 → L3,三层都过才发 `cost_guard.authorized`,避免"前层过后层拒"的虚耗污染后续累计
+  - L2 / L3 拒绝都不走 brief 重规划(累计量不因缩 prompt 而下降,只能等次日或走 HITL 增额)
 - **通用重试装饰器**(`src/auto_marketing_agent/retry.py`):`@retry(retry_on=(...))` 指数退避 + 抖动,同步 / 异步共用
 - **Guardrail 规则引擎**(`src/auto_marketing_agent/guardrail/`):品牌词典 + 中国广告法绝对化 / 医疗 + 欧盟基础比较 / 儿童宣传 4 类规则,`evaluate_variant` 产出 ApprovalDecision
 - **HITL 内存队列**(`src/auto_marketing_agent/hitl/`):`InMemoryHitlQueue` 幂等入队 / resolve 状态机,coordinator 在 Guardrail 产出 `needs_hitl` 时自动入队,生产后端留 P2
@@ -42,7 +44,7 @@ P0 MVP 骨架已闭环,P1 离线部分(Cost Guard L1 / 重试装饰器 / Guardra
 - **Docker 化**(`Dockerfile` + `docker-compose.yml`):多阶段构建、非 root 运行、CI 里加 `docker-build` 验证 `--help`
 - **Golden cases**(`tests/golden/`):5 条 Audience + 5 条 Creative,`tests/test_golden_cases.py` 作 CI 阻塞回归
 
-未实现:Media Buyer / Attribution / Experiment 三个 agent,以及 Circuit Breaker、Data Layer、Knowledge Store 三个平台组件,以及 HITL / DLQ / Event Store 的 Postgres 持久化后端 / Cost Guard L3 平台级 cap,全部排在 P1+。事件驱动 handoff(Attribution → Creative 回炉)留 P2。
+未实现:Media Buyer / Attribution / Experiment 三个 agent,以及 Circuit Breaker、Data Layer、Knowledge Store 三个平台组件,以及 HITL / DLQ / Event Store 的 Postgres 持久化后端,全部排在 P1+。事件驱动 handoff(Attribution → Creative 回炉)留 P2。
 
 技术栈决策见 [`docs/adr/0001-tech-stack.md`](docs/adr/0001-tech-stack.md);任务追踪见 [`docs/tasks.md`](docs/tasks.md)。
 

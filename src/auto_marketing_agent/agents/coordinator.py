@@ -29,6 +29,7 @@ from auto_marketing_agent.cost_guard import (
     CostGuardDecision,
     CostGuardDenied,
     DailyCostGuard,
+    PlatformDailyCostGuard,
     estimate_prompt_tokens,
 )
 from auto_marketing_agent.dlq import DlqItem, DlqQueue
@@ -186,20 +187,24 @@ async def _authorized_run(
     prompt: str,
     cost_guard: CostGuard,
     daily_cost_guard: DailyCostGuard | None,
+    platform_cost_guard: PlatformDailyCostGuard | None,
     decisions: list[CostGuardDecision],
     event_store: EventStore | None,
     dlq_queue: DlqQueue | None,
     correlation_id: str,
     campaign_id: str | None,
 ) -> Any:
-    """调 Cost Guard L1 → L2 都放行后再跑 Runner。
+    """调 Cost Guard L1 → L2 → L3 都放行后再跑 Runner。
 
     L1(`cost_guard`):单调用 ceiling,无状态,一定跑。
     L2(`daily_cost_guard`):campaign 单日累计,可选;campaign_id=None(Orchestrator
     阶段)直接跳过。
+    L3(`platform_cost_guard`):平台单日累计,可选;不按 campaign 过滤,Orchestrator
+    阶段也算入。
 
-    任一层拒绝都发 `cost_guard.denied`(payload 带 level 区分)。两层都过才发
-    `cost_guard.authorized`,确保 L2 下次聚合时不会把"L1 过但 L2 没过"的虚耗算进去。
+    任一层拒绝都发 `cost_guard.denied`(payload 带 level 区分)。三层都过才发
+    `cost_guard.authorized`,确保 L2/L3 下次聚合时不会把"前层过但后层没过"的虚耗
+    算进去。
 
     Runner 抛 `ModelBehaviorError`(JSON 结构 / schema 不匹配)时,如果传了
     `dlq_queue` 就落 DLQ 并发 `dlq.enqueued` 事件,最后统一抛
@@ -234,6 +239,29 @@ async def _authorized_run(
             daily_cost_guard.authorize_call(
                 agent_name=agent.name,
                 campaign_id=campaign_id,
+                estimated_prompt_tokens=prompt_tokens,
+                estimated_output_tokens=output_budget,
+            )
+        except CostGuardDenied as denial:
+            _emit_event(
+                event_store,
+                event_type="cost_guard.denied",
+                source="coordinator",
+                correlation_id=correlation_id,
+                campaign_id=campaign_id,
+                payload={
+                    "agent_name": denial.agent_name,
+                    "level": denial.level,
+                    "limit_kind": denial.limit_kind,
+                    "observed": denial.observed,
+                    "limit": denial.limit,
+                },
+            )
+            raise
+    if platform_cost_guard is not None:
+        try:
+            platform_cost_guard.authorize_call(
+                agent_name=agent.name,
                 estimated_prompt_tokens=prompt_tokens,
                 estimated_output_tokens=output_budget,
             )
@@ -321,6 +349,7 @@ async def _run_campaign_once(
     agents: CampaignAgents,
     cost_guard: CostGuard,
     daily_cost_guard: DailyCostGuard | None,
+    platform_cost_guard: PlatformDailyCostGuard | None,
     guardrail_engine: GuardrailEngine,
     hitl_queue: HitlQueue | None,
     event_store: EventStore | None,
@@ -347,6 +376,7 @@ async def _run_campaign_once(
         prompt=orch_input,
         cost_guard=cost_guard,
         daily_cost_guard=daily_cost_guard,
+        platform_cost_guard=platform_cost_guard,
         decisions=decisions,
         event_store=event_store,
         dlq_queue=dlq_queue,
@@ -366,6 +396,7 @@ async def _run_campaign_once(
             prompt=audience_input,
             cost_guard=cost_guard,
             daily_cost_guard=daily_cost_guard,
+            platform_cost_guard=platform_cost_guard,
             decisions=decisions,
             event_store=event_store,
             dlq_queue=dlq_queue,
@@ -385,6 +416,7 @@ async def _run_campaign_once(
             prompt=creative_input,
             cost_guard=cost_guard,
             daily_cost_guard=daily_cost_guard,
+            platform_cost_guard=platform_cost_guard,
             decisions=decisions,
             event_store=event_store,
             dlq_queue=dlq_queue,
@@ -474,6 +506,7 @@ async def run_campaign(
     agents: CampaignAgents,
     cost_guard: CostGuard | None = None,
     daily_cost_guard: DailyCostGuard | None = None,
+    platform_cost_guard: PlatformDailyCostGuard | None = None,
     guardrail_engine: GuardrailEngine | None = None,
     hitl_queue: HitlQueue | None = None,
     event_store: EventStore | None = None,
@@ -493,11 +526,12 @@ async def run_campaign(
     needs_hitl 会入 `hitl_queue`(如传入),coordinator 本身不阻塞 —— 是否暂停投放
     由 caller(Web UI / 事件消费者)依据工单状态决定。
 
-    **重规划(P1-004):** Audience / Creative 阶段被 Cost Guard 拒时,coordinator
+    **重规划(P1-004):** Audience / Creative 阶段被 Cost Guard L1 拒时,coordinator
     会把拒绝上下文追加到 brief,重跑 Orchestrator → Audience → Creative 链,让
     Orchestrator 产出更精简的 CampaignPlan。最多重试 `max_cost_replans` 次,超限或
     Orchestrator 自身被拒(brief 太长没法自动压缩)直接把最后一次的 `CostGuardDenied`
-    抛出。`max_cost_replans=0` 完全关闭重规划,任何拒绝直接抛。每次触发重规划发
+    抛出。L2/L3 拒绝是累计额度打爆,压 prompt 也救不回来,直接往上抛,不走重规划。
+    `max_cost_replans=0` 完全关闭重规划,任何拒绝直接抛。每次触发重规划发
     `cost_replan.triggered`,方便重放时还原 brief 的演化轨迹。
 
     **事件(P1-020/021):** 如传入 `event_store`,coordinator 会在 cost_guard /
@@ -529,6 +563,7 @@ async def run_campaign(
                 agents=agents,
                 cost_guard=guard,
                 daily_cost_guard=daily_cost_guard,
+                platform_cost_guard=platform_cost_guard,
                 guardrail_engine=engine,
                 hitl_queue=hitl_queue,
                 event_store=event_store,
@@ -538,8 +573,8 @@ async def run_campaign(
             # Orchestrator 自身被拒 = brief 太长,没法再压缩;重试只会卡在同一步。
             if denial.agent_name == "orchestrator-agent":
                 raise
-            # L2 是累计额度,压 prompt 救不回来;让上层(HITL 增额 / 次日)处理。
-            if denial.level == "L2":
+            # L2/L3 是累计额度,压 prompt 救不回来;让上层(HITL 增额 / 次日)处理。
+            if denial.level in ("L2", "L3"):
                 raise
             if attempts_remaining <= 0:
                 raise

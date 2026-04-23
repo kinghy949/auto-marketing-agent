@@ -1,4 +1,4 @@
-"""Cost Guard L1 + L2 实现。
+"""Cost Guard L1 + L2 + L3 实现。
 
 职责:
 - **L1**(`CostGuard`):每次 LLM 调用前按 (estimated_prompt_tokens,
@@ -8,13 +8,17 @@
   `cost_guard.authorized` 事件,不另立独立计数器 —— 事件是单一事实来源,重启 /
   多进程都能自恢复,代价只是每次拦截多扫一遍窗口内事件(P1 量级可接受;
   真上量后改 Postgres 索引聚合)。
+- **L3**(`PlatformDailyCostGuard`,P1-003):同源聚合,但不按 campaign 过滤,
+  把 Orchestrator 阶段(campaign_id=None)也算进去 —— L3 是平台级 daily cap,
+  跨 campaign 共享,用来封顶"所有租户 / 所有 campaign 在同一 UTC 日内"的总花费,
+  防止单个租户/活动意外消耗整个 API 配额。
 - 拒绝统一抛 `CostGuardDenied`,带 `level` / `limit_kind`,便于 coordinator 据此
-  决定:L1 允许重规划(压缩 brief);L2 不允许重规划(日预算是累计量,压 prompt
-  也救不回来,只能等次日或走 HITL 增额)。
+  决定:L1 允许重规划(压缩 brief);L2/L3 都不允许重规划(日预算是累计量,压
+  prompt 救不回来,只能等次日或走 HITL 增额)。
 
-`estimate_prompt_tokens` 启发式估算,避免对 `tiktoken` 强依赖。L2 上线后仍沿用,
-因为 L2 聚合的也是 L1 时刻的估算值,一致口径不会自我矛盾;真实计数要等 P2 把
-模型侧 usage 回填到事件。
+`estimate_prompt_tokens` 启发式估算,避免对 `tiktoken` 强依赖。L2/L3 上线后仍沿用,
+因为聚合的也是 L1 时刻的估算值,一致口径不会自我矛盾;真实计数要等 P2 把模型侧
+usage 回填到事件。
 """
 
 from __future__ import annotations
@@ -29,19 +33,20 @@ from auto_marketing_agent.events import EventStore
 class CostGuardDenied(Exception):
     """Cost Guard 拒绝一次调用时抛出。
 
-    `level` 区分 L1(单次 hard ceiling)/ L2(campaign 单日累计)。L3 平台层
-    cap 上线后会再扩。`limit_kind` 是具体触发项,方便 event 里分类归因。
+    `level` 区分 L1(单次 hard ceiling)/ L2(campaign 单日累计)/ L3(平台单日累计)。
+    `limit_kind` 是具体触发项,方便 event 里分类归因。
     """
 
     def __init__(
         self,
         *,
-        level: Literal["L1", "L2"],
+        level: Literal["L1", "L2", "L3"],
         limit_kind: Literal[
             "prompt_tokens",
             "output_tokens",
             "total_tokens",
             "campaign_daily_tokens",
+            "platform_daily_tokens",
         ],
         observed: int,
         limit: int,
@@ -97,6 +102,16 @@ class DailyCostConfig:
     """
 
     max_tokens_per_campaign_per_day: int = 50_000
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformDailyCostConfig:
+    """L3 平台层上限。默认 500k token / 日,相当于 10 个 campaign 跑满 L2 默认上限,
+    再留 1-2 个活动的余量给运维应急。真实部署时必须按订阅的模型定价与预算重校 ——
+    这里给的只是 P1 的安全兜底,不是推荐值。
+    """
+
+    max_tokens_per_day: int = 500_000
 
 
 class CostGuard:
@@ -238,6 +253,73 @@ class DailyCostGuard:
                 limit_kind="campaign_daily_tokens",
                 observed=used + planned,
                 limit=self._config.max_tokens_per_campaign_per_day,
+                agent_name=agent_name,
+            )
+
+
+class PlatformDailyCostGuard:
+    """L3 —— 平台单日 token 累计拦截(P1-003)。
+
+    职责与 L2 一致,差别只在"过滤范围":L3 不按 campaign 分,把整个事件流里当日的
+    `cost_guard.authorized` 都加起来,Orchestrator 阶段(campaign_id=None)也算进去 ——
+    它也要烧 token,必须计入平台总耗。
+
+    设计取舍:
+    - 单独 class 而不是往 `DailyCostGuard` 塞 scope 参数。L2 和 L3 的业务语义不同
+      (单 campaign 超额 vs. 平台超额),限额配置不同,错误归因不同;合并成一个类
+      反而把"按 campaign 聚合"和"全局聚合"两套决策藏在参数后,后续加 tenant 级 cap
+      会越塞越乱。
+    - 复用 DailyCostGuard 的"读 Event Store、不维护独立计数"策略(参考 L2 docstring)。
+    - 拦截顺序在 L2 之后 —— coordinator 先查 campaign 日预算、再查平台预算,这样
+      事件日志能先暴露 L2 被打爆的 campaign,再暴露 L3 被打爆的租户,定位更快。
+    """
+
+    def __init__(
+        self,
+        event_store: EventStore,
+        config: PlatformDailyCostConfig | None = None,
+    ) -> None:
+        self._event_store = event_store
+        self._config = config or PlatformDailyCostConfig()
+
+    @property
+    def config(self) -> PlatformDailyCostConfig:
+        return self._config
+
+    def authorize_call(
+        self,
+        *,
+        agent_name: str,
+        estimated_prompt_tokens: int,
+        estimated_output_tokens: int,
+    ) -> None:
+        """聚合窗口内所有 `cost_guard.authorized`(不分 campaign)token,
+        `used + planned` 超 `max_tokens_per_day` 即 denied。
+        """
+        if estimated_prompt_tokens < 0 or estimated_output_tokens < 0:
+            raise ValueError(
+                "estimated tokens must be non-negative: "
+                f"prompt={estimated_prompt_tokens}, output={estimated_output_tokens}"
+            )
+
+        now = datetime.now(timezone.utc)
+        window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        past_events = self._event_store.list_by_time_range(
+            start=window_start,
+            event_type="cost_guard.authorized",
+        )
+        used = 0
+        for evt in past_events:
+            used += int(evt.payload.get("estimated_prompt_tokens", 0))
+            used += int(evt.payload.get("estimated_output_tokens", 0))
+
+        planned = estimated_prompt_tokens + estimated_output_tokens
+        if used + planned > self._config.max_tokens_per_day:
+            raise CostGuardDenied(
+                level="L3",
+                limit_kind="platform_daily_tokens",
+                observed=used + planned,
+                limit=self._config.max_tokens_per_day,
                 agent_name=agent_name,
             )
 

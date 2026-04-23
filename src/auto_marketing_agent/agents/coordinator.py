@@ -28,6 +28,7 @@ from auto_marketing_agent.cost_guard import (
     CostGuard,
     CostGuardDecision,
     CostGuardDenied,
+    DailyCostGuard,
     estimate_prompt_tokens,
 )
 from auto_marketing_agent.dlq import DlqItem, DlqQueue
@@ -184,27 +185,32 @@ async def _authorized_run(
     agent: Agent[None],
     prompt: str,
     cost_guard: CostGuard,
+    daily_cost_guard: DailyCostGuard | None,
     decisions: list[CostGuardDecision],
     event_store: EventStore | None,
     dlq_queue: DlqQueue | None,
     correlation_id: str,
     campaign_id: str | None,
 ) -> Any:
-    """调 Cost Guard L1 放行后再跑 Runner。
+    """调 Cost Guard L1 → L2 都放行后再跑 Runner。
 
-    Cost Guard 放行发 `cost_guard.authorized`;拒绝发 `cost_guard.denied` 再抛
-    `CostGuardDenied`,由 caller 决定是否重试。`decisions` 列表保留原职责,供
-    P2 批量 flush 使用;`event_store` 是即时写入的独立通道,互不替代。
+    L1(`cost_guard`):单调用 ceiling,无状态,一定跑。
+    L2(`daily_cost_guard`):campaign 单日累计,可选;campaign_id=None(Orchestrator
+    阶段)直接跳过。
+
+    任一层拒绝都发 `cost_guard.denied`(payload 带 level 区分)。两层都过才发
+    `cost_guard.authorized`,确保 L2 下次聚合时不会把"L1 过但 L2 没过"的虚耗算进去。
 
     Runner 抛 `ModelBehaviorError`(JSON 结构 / schema 不匹配)时,如果传了
     `dlq_queue` 就落 DLQ 并发 `dlq.enqueued` 事件,最后统一抛
     `SchemaDeserializationFailed` —— 这种失败不可重试,必须人工 triage。
     """
     output_budget = _ESTIMATED_OUTPUT_TOKENS.get(agent.name, _DEFAULT_OUTPUT_TOKENS)
+    prompt_tokens = estimate_prompt_tokens(prompt)
     try:
         decision = cost_guard.authorize_call(
             agent_name=agent.name,
-            estimated_prompt_tokens=estimate_prompt_tokens(prompt),
+            estimated_prompt_tokens=prompt_tokens,
             estimated_output_tokens=output_budget,
         )
     except CostGuardDenied as denial:
@@ -223,6 +229,30 @@ async def _authorized_run(
             },
         )
         raise
+    if daily_cost_guard is not None:
+        try:
+            daily_cost_guard.authorize_call(
+                agent_name=agent.name,
+                campaign_id=campaign_id,
+                estimated_prompt_tokens=prompt_tokens,
+                estimated_output_tokens=output_budget,
+            )
+        except CostGuardDenied as denial:
+            _emit_event(
+                event_store,
+                event_type="cost_guard.denied",
+                source="coordinator",
+                correlation_id=correlation_id,
+                campaign_id=campaign_id,
+                payload={
+                    "agent_name": denial.agent_name,
+                    "level": denial.level,
+                    "limit_kind": denial.limit_kind,
+                    "observed": denial.observed,
+                    "limit": denial.limit,
+                },
+            )
+            raise
     decisions.append(decision)
     _emit_event(
         event_store,
@@ -290,6 +320,7 @@ async def _run_campaign_once(
     correlation_id: str,
     agents: CampaignAgents,
     cost_guard: CostGuard,
+    daily_cost_guard: DailyCostGuard | None,
     guardrail_engine: GuardrailEngine,
     hitl_queue: HitlQueue | None,
     event_store: EventStore | None,
@@ -315,6 +346,7 @@ async def _run_campaign_once(
         agent=agents.orchestrator,
         prompt=orch_input,
         cost_guard=cost_guard,
+        daily_cost_guard=daily_cost_guard,
         decisions=decisions,
         event_store=event_store,
         dlq_queue=dlq_queue,
@@ -333,6 +365,7 @@ async def _run_campaign_once(
             agent=agents.audience,
             prompt=audience_input,
             cost_guard=cost_guard,
+            daily_cost_guard=daily_cost_guard,
             decisions=decisions,
             event_store=event_store,
             dlq_queue=dlq_queue,
@@ -351,6 +384,7 @@ async def _run_campaign_once(
             agent=agents.creative,
             prompt=creative_input,
             cost_guard=cost_guard,
+            daily_cost_guard=daily_cost_guard,
             decisions=decisions,
             event_store=event_store,
             dlq_queue=dlq_queue,
@@ -439,6 +473,7 @@ async def run_campaign(
     correlation_id: str,
     agents: CampaignAgents,
     cost_guard: CostGuard | None = None,
+    daily_cost_guard: DailyCostGuard | None = None,
     guardrail_engine: GuardrailEngine | None = None,
     hitl_queue: HitlQueue | None = None,
     event_store: EventStore | None = None,
@@ -493,6 +528,7 @@ async def run_campaign(
                 correlation_id=correlation_id,
                 agents=agents,
                 cost_guard=guard,
+                daily_cost_guard=daily_cost_guard,
                 guardrail_engine=engine,
                 hitl_queue=hitl_queue,
                 event_store=event_store,
@@ -501,6 +537,9 @@ async def run_campaign(
         except CostGuardDenied as denial:
             # Orchestrator 自身被拒 = brief 太长,没法再压缩;重试只会卡在同一步。
             if denial.agent_name == "orchestrator-agent":
+                raise
+            # L2 是累计额度,压 prompt 救不回来;让上层(HITL 增额 / 次日)处理。
+            if denial.level == "L2":
                 raise
             if attempts_remaining <= 0:
                 raise

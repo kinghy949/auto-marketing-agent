@@ -1,34 +1,48 @@
-"""Cost Guard L1 实现。
+"""Cost Guard L1 + L2 实现。
 
 职责:
-- 在每次 LLM 调用前,基于(estimated_prompt_tokens, max_output_tokens)做硬上限拦截。
-- 提供 `estimate_prompt_tokens` 启发式估算,避免对 `tiktoken` 的强依赖。真正的
-  tokenizer 替换在 P1-002 扩展 L2 时引入。
-- 拒绝时抛 `CostGuardDenied`,带上 level / reason / limits,便于 coordinator 记录
-  event 与决定是否触发 handoff 重新规划(P1-004)。
+- **L1**(`CostGuard`):每次 LLM 调用前按 (estimated_prompt_tokens,
+  estimated_output_tokens) 做硬上限拦截,无状态,同步。
+- **L2**(`DailyCostGuard`,P1-002):按 campaign_id + UTC 日窗聚合已放行 token,
+  超 `max_tokens_per_campaign_per_day` 即拒绝。状态来源是 Event Store 的
+  `cost_guard.authorized` 事件,不另立独立计数器 —— 事件是单一事实来源,重启 /
+  多进程都能自恢复,代价只是每次拦截多扫一遍窗口内事件(P1 量级可接受;
+  真上量后改 Postgres 索引聚合)。
+- 拒绝统一抛 `CostGuardDenied`,带 `level` / `limit_kind`,便于 coordinator 据此
+  决定:L1 允许重规划(压缩 brief);L2 不允许重规划(日预算是累计量,压 prompt
+  也救不回来,只能等次日或走 HITL 增额)。
 
-L2 / L3 不在此文件里 —— 它们需要 Event Store 做 daily 累计,不放进 L1 的单调用
-同步拦截路径。
+`estimate_prompt_tokens` 启发式估算,避免对 `tiktoken` 强依赖。L2 上线后仍沿用,
+因为 L2 聚合的也是 L1 时刻的估算值,一致口径不会自我矛盾;真实计数要等 P2 把
+模型侧 usage 回填到事件。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal
+
+from auto_marketing_agent.events import EventStore
 
 
 class CostGuardDenied(Exception):
     """Cost Guard 拒绝一次调用时抛出。
 
-    `level` 固定为 L1(当前只有 L1);L2/L3 上线后会在各自的 guard 模块里各自抛。
-    `reason` 是给日志 / event store 用的短字符串,`limit_kind` 是触发项。
+    `level` 区分 L1(单次 hard ceiling)/ L2(campaign 单日累计)。L3 平台层
+    cap 上线后会再扩。`limit_kind` 是具体触发项,方便 event 里分类归因。
     """
 
     def __init__(
         self,
         *,
-        level: Literal["L1"],
-        limit_kind: Literal["prompt_tokens", "output_tokens", "total_tokens"],
+        level: Literal["L1", "L2"],
+        limit_kind: Literal[
+            "prompt_tokens",
+            "output_tokens",
+            "total_tokens",
+            "campaign_daily_tokens",
+        ],
         observed: int,
         limit: int,
         agent_name: str,
@@ -61,7 +75,8 @@ class CostGuardDecision:
     """Cost Guard 通过时返回的决策记录。
 
     用在后续 P1-021 Event Store 写入场景:coordinator 把这条 decision 一起落 event,
-    重放时能复现"当时允许放行是基于哪条 L1 配额"。
+    重放时能复现"当时允许放行是基于哪条 L1 配额"。L2 不独立返回 decision —— 它
+    的"通过"语义就是"没抛 denied",不需要在上游累计多余状态。
     """
 
     level: Literal["L1"]
@@ -72,6 +87,16 @@ class CostGuardDecision:
     @property
     def estimated_total_tokens(self) -> int:
         return self.estimated_prompt_tokens + self.estimated_output_tokens
+
+
+@dataclass(frozen=True, slots=True)
+class DailyCostConfig:
+    """L2 上限。默认 50k token / campaign / 日 —— 按 P1 默认 L1(~10k/call)推,
+    允许一天约 5 次完整 Orchestrator→Audience→Creative 链路,留足 HITL 复核空间。
+    业务侧通过 Settings 覆盖。
+    """
+
+    max_tokens_per_campaign_per_day: int = 50_000
 
 
 class CostGuard:
@@ -139,6 +164,82 @@ class CostGuard:
             estimated_prompt_tokens=estimated_prompt_tokens,
             estimated_output_tokens=estimated_output_tokens,
         )
+
+
+class DailyCostGuard:
+    """L2 —— campaign 单日 token 累计拦截(P1-002)。
+
+    状态只读 Event Store:聚合当前 UTC 日内、同 campaign_id 的
+    `cost_guard.authorized` 事件,用 payload 里的 `estimated_prompt_tokens +
+    estimated_output_tokens` 求和。调用前判断 `used + planned` 是否超过
+    `max_tokens_per_campaign_per_day`,超限即抛 `CostGuardDenied(level=L2)`。
+
+    设计取舍:
+    - 用"已放行"而非"真实消耗"作为累计口径。P1 阶段没有回填真实 usage 的事件,
+      用估算值做出的日预算本质也是估算值,口径一致不会漂。真实 usage 回填排
+      P2 —— 到时候聚合器换源,外部接口不变。
+    - `campaign_id=None` 不拦 —— Orchestrator 阶段还没 campaign_id,此时只有 L1
+      管。把 "没有 campaign 的调用" 也纳入 L2 会把 correlation / campaign 两种
+      scope 混在一起,出错时难排查。
+    - 不缓存计数。P1 量级每次扫事件在内存里跑 O(events_in_day),Postgres 后端
+      接入后改为 SQL `sum()`,cache 留给那时做。
+    - 窗口起点用 "今天 UTC 00:00",而非滚动 24 小时。日预算的业务语义天然是
+      "按日结算",滚动窗会让运维拿不到"到今天为止花了多少"的直觉读数。
+    """
+
+    def __init__(
+        self,
+        event_store: EventStore,
+        config: DailyCostConfig | None = None,
+    ) -> None:
+        self._event_store = event_store
+        self._config = config or DailyCostConfig()
+
+    @property
+    def config(self) -> DailyCostConfig:
+        return self._config
+
+    def authorize_call(
+        self,
+        *,
+        agent_name: str,
+        campaign_id: str | None,
+        estimated_prompt_tokens: int,
+        estimated_output_tokens: int,
+    ) -> None:
+        """campaign_id=None 直接放行;否则累加窗口内同 campaign 的已放行 token,
+        `used + planned` 超 `max_tokens_per_campaign_per_day` 即 denied。
+        """
+        if campaign_id is None:
+            return
+        if estimated_prompt_tokens < 0 or estimated_output_tokens < 0:
+            raise ValueError(
+                "estimated tokens must be non-negative: "
+                f"prompt={estimated_prompt_tokens}, output={estimated_output_tokens}"
+            )
+
+        now = datetime.now(timezone.utc)
+        window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        past_events = self._event_store.list_by_time_range(
+            start=window_start,
+            event_type="cost_guard.authorized",
+        )
+        used = 0
+        for evt in past_events:
+            if evt.campaign_id != campaign_id:
+                continue
+            used += int(evt.payload.get("estimated_prompt_tokens", 0))
+            used += int(evt.payload.get("estimated_output_tokens", 0))
+
+        planned = estimated_prompt_tokens + estimated_output_tokens
+        if used + planned > self._config.max_tokens_per_campaign_per_day:
+            raise CostGuardDenied(
+                level="L2",
+                limit_kind="campaign_daily_tokens",
+                observed=used + planned,
+                limit=self._config.max_tokens_per_campaign_per_day,
+                agent_name=agent_name,
+            )
 
 
 def estimate_prompt_tokens(text: str) -> int:

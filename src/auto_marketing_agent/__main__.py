@@ -28,6 +28,7 @@ from auto_marketing_agent.agents.coordinator import (
     run_campaign,
 )
 from auto_marketing_agent.agents.hello import run_hello
+from auto_marketing_agent.cost_guard import DailyCostGuard
 from auto_marketing_agent.dlq import InMemoryDlq
 from auto_marketing_agent.events import (
     Event,
@@ -213,11 +214,13 @@ def main(argv: list[str] | None = None) -> int:
             event_store = JsonlEventStore(path=Path(args.events_file))
         else:
             event_store = InMemoryEventStore()
+        daily_cost_guard = DailyCostGuard(event_store=event_store)
         result = asyncio.run(
             run_campaign(
                 brief=args.brief,
                 correlation_id=correlation_id,
                 agents=agents,
+                daily_cost_guard=daily_cost_guard,
                 hitl_queue=hitl_queue,
                 event_store=event_store,
                 dlq_queue=dlq_queue,

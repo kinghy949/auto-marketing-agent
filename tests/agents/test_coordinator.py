@@ -22,7 +22,13 @@ from auto_marketing_agent.agents.coordinator import (
     _check_consistency,
     run_campaign,
 )
-from auto_marketing_agent.cost_guard import CostGuard, CostGuardConfig, CostGuardDenied
+from auto_marketing_agent.cost_guard import (
+    CostGuard,
+    CostGuardConfig,
+    CostGuardDenied,
+    DailyCostConfig,
+    DailyCostGuard,
+)
 from auto_marketing_agent.dlq import InMemoryDlq
 from auto_marketing_agent.events import InMemoryEventStore
 from auto_marketing_agent.hitl import InMemoryHitlQueue
@@ -889,3 +895,132 @@ async def test_schema_deserialization_failure_without_dlq_still_raises(
             agents=_build_default_agents(),
         )
     assert exc.value.dlq_item is None
+
+
+# ---------------------------------------------------------------------------
+# P1-002 Cost Guard L2 —— campaign 单日累计拦截
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_daily_cost_guard_happy_path_same_event_order_as_l1_only(
+    stub_runner: list[Any],
+) -> None:
+    """默认预算下 L2 不拦截,事件序列与 L1-only 一致。"""
+    store = InMemoryEventStore()
+    daily = DailyCostGuard(event_store=store)
+
+    await run_campaign(
+        brief="x",
+        correlation_id=CORRELATION,
+        agents=_build_default_agents(),
+        event_store=store,
+        daily_cost_guard=daily,
+    )
+
+    types = [e.event_type for e in store.list_all()]
+    assert types == [
+        "cost_guard.authorized",
+        "cost_guard.authorized",
+        "cost_guard.authorized",
+        "guardrail.evaluated",
+        "campaign.completed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_daily_cost_guard_denies_on_creative_and_does_not_replan(
+    stub_runner: list[Any],
+) -> None:
+    """让 L2 在 creative 阶段爆 —— orchestrator/audience 花掉大部分预算后,creative
+    的 estimate 一叠加就超。此时 coordinator 不得触发重规划(L2 是累计额度,压
+    brief 救不回来),应该直接抛 L2 CostGuardDenied。
+
+    Orchestrator 的 authorized 事件 campaign_id=None,L2 按设计不计入,所以真正
+    计入的只有 audience(539)。creative 规划 1048,539 + 1048 = 1587 > 1500 即爆。
+    """
+    store = InMemoryEventStore()
+    daily = DailyCostGuard(
+        event_store=store,
+        config=DailyCostConfig(max_tokens_per_campaign_per_day=1_500),
+    )
+
+    with pytest.raises(CostGuardDenied) as exc:
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            event_store=store,
+            daily_cost_guard=daily,
+            max_cost_replans=3,
+        )
+
+    assert exc.value.level == "L2"
+    assert exc.value.limit_kind == "campaign_daily_tokens"
+    assert exc.value.agent_name == "creative-agent"
+
+    # orchestrator 只跑了一次(没触发重规划),stub_runner 里应当只有 3 个调用:
+    # orch + audience + creative(被 L2 拦在 cost_guard 层,不会真的进 Runner.run,
+    # 但名字已经 append 进 calls 列表 —— 所以这里断言 3 条)。
+    # 实际上 stub_runner.fake_run 只在 Runner.run 被调用时 append,而 L2 在 Runner.run
+    # 之前就抛了;因此实际只有 2 条。
+    agent_calls = [name for name, _ in stub_runner]
+    assert agent_calls == ["orchestrator-agent", "audience-agent"]
+
+
+@pytest.mark.asyncio
+async def test_daily_cost_guard_emits_denied_event_with_level_l2(
+    stub_runner: list[Any],
+) -> None:
+    store = InMemoryEventStore()
+    daily = DailyCostGuard(
+        event_store=store,
+        config=DailyCostConfig(max_tokens_per_campaign_per_day=1_500),
+    )
+
+    with pytest.raises(CostGuardDenied):
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            event_store=store,
+            daily_cost_guard=daily,
+        )
+
+    denied = [e for e in store.list_all() if e.event_type == "cost_guard.denied"]
+    assert len(denied) == 1
+    assert denied[0].payload["level"] == "L2"
+    assert denied[0].payload["limit_kind"] == "campaign_daily_tokens"
+    assert denied[0].payload["agent_name"] == "creative-agent"
+    assert denied[0].campaign_id == CAMPAIGN_ID
+
+
+@pytest.mark.asyncio
+async def test_daily_cost_guard_does_not_emit_authorized_when_l2_denies(
+    stub_runner: list[Any],
+) -> None:
+    """L1 过、L2 拒 的调用不得写入 cost_guard.authorized —— 否则下次聚合会把
+    没跑成的调用算进日预算,滚雪球误拦。
+    """
+    store = InMemoryEventStore()
+    daily = DailyCostGuard(
+        event_store=store,
+        config=DailyCostConfig(max_tokens_per_campaign_per_day=1_500),
+    )
+
+    with pytest.raises(CostGuardDenied):
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            event_store=store,
+            daily_cost_guard=daily,
+        )
+
+    authorized = [e for e in store.list_all() if e.event_type == "cost_guard.authorized"]
+    # 只有 orchestrator + audience 应写 authorized,creative 在 L2 拦截处抛,
+    # 不应有第三条 authorized。
+    assert [e.payload["agent_name"] for e in authorized] == [
+        "orchestrator-agent",
+        "audience-agent",
+    ]

@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from agents.exceptions import ModelBehaviorError
+
 from agents import Agent, Runner
 from auto_marketing_agent.agents.audience import build_audience_agent
 from auto_marketing_agent.agents.creative import build_creative_agent
@@ -28,6 +30,7 @@ from auto_marketing_agent.cost_guard import (
     CostGuardDenied,
     estimate_prompt_tokens,
 )
+from auto_marketing_agent.dlq import DlqItem, DlqQueue
 from auto_marketing_agent.events import Event, EventStore, EventType
 from auto_marketing_agent.guardrail import GuardrailEngine, default_engine
 from auto_marketing_agent.hitl import HitlItem, HitlQueue
@@ -50,6 +53,32 @@ class CreativeRejected(RuntimeError):
             f"CreativeVariant {decision.subject_id} 机审 reject: violations={decision.violations}"
         )
         self.decision = decision
+
+
+class SchemaDeserializationFailed(RuntimeError):
+    """Agent 输出无法反序列化为声明的 `output_type`(SDK 抛 `ModelBehaviorError`)。
+
+    设计取舍:
+    - 不重试。schema 不一致多半是模型把 JSON 结构写错(字段名、类型、缺 key),
+      重跑同 prompt 期望同 payload,结果几乎一样;应当由运维 triage payload
+      决定是补 schema 还是丢弃,而不是让 coordinator 自动吞掉。
+    - 传了 `dlq_queue` 时一定会入队,`dlq_item` 非空;没传则保持兼容(直接抛,
+      上游自担风险)。测试里走后者路径可以避免造 DLQ stub。
+    """
+
+    def __init__(
+        self,
+        agent_name: str,
+        original: ModelBehaviorError,
+        dlq_item: DlqItem | None,
+    ) -> None:
+        self.agent_name = agent_name
+        self.original = original
+        self.dlq_item = dlq_item
+        dlq_ref = dlq_item.item_id if dlq_item is not None else "未入队"
+        super().__init__(
+            f"{agent_name} 输出反序列化失败(DLQ={dlq_ref}): {original}"
+        )
 
 
 # 不同 agent 产出长度差异大,给 output_tokens 估算留一个档位表。L2 接入真实 tokenizer
@@ -157,6 +186,7 @@ async def _authorized_run(
     cost_guard: CostGuard,
     decisions: list[CostGuardDecision],
     event_store: EventStore | None,
+    dlq_queue: DlqQueue | None,
     correlation_id: str,
     campaign_id: str | None,
 ) -> Any:
@@ -165,6 +195,10 @@ async def _authorized_run(
     Cost Guard 放行发 `cost_guard.authorized`;拒绝发 `cost_guard.denied` 再抛
     `CostGuardDenied`,由 caller 决定是否重试。`decisions` 列表保留原职责,供
     P2 批量 flush 使用;`event_store` 是即时写入的独立通道,互不替代。
+
+    Runner 抛 `ModelBehaviorError`(JSON 结构 / schema 不匹配)时,如果传了
+    `dlq_queue` 就落 DLQ 并发 `dlq.enqueued` 事件,最后统一抛
+    `SchemaDeserializationFailed` —— 这种失败不可重试,必须人工 triage。
     """
     output_budget = _ESTIMATED_OUTPUT_TOKENS.get(agent.name, _DEFAULT_OUTPUT_TOKENS)
     try:
@@ -203,7 +237,35 @@ async def _authorized_run(
             "estimated_output_tokens": decision.estimated_output_tokens,
         },
     )
-    return await Runner.run(agent, prompt)
+    try:
+        return await Runner.run(agent, prompt)
+    except ModelBehaviorError as err:
+        dlq_item: DlqItem | None = None
+        if dlq_queue is not None:
+            # SDK 不暴露 raw JSON 字符串;err.message 里通常带了触发 payload 片段,
+            # 直接保留原文给运维做 triage —— 这里刻意不尝试再解析。
+            dlq_item = dlq_queue.push(
+                reason="schema_deserialization_failed",
+                source=agent.name,
+                correlation_id=correlation_id,
+                campaign_id=campaign_id,
+                raw_payload=str(err),
+                error_message=f"{type(err).__name__}: {err}",
+            )
+            _emit_event(
+                event_store,
+                event_type="dlq.enqueued",
+                source="coordinator",
+                correlation_id=correlation_id,
+                campaign_id=campaign_id,
+                payload={
+                    "dlq_item_id": dlq_item.item_id,
+                    "reason": dlq_item.reason,
+                    "source": dlq_item.source,
+                    "error_message": dlq_item.error_message,
+                },
+            )
+        raise SchemaDeserializationFailed(agent.name, err, dlq_item) from err
 
 
 def _format_replan_hint(denial: CostGuardDenied) -> str:
@@ -231,6 +293,7 @@ async def _run_campaign_once(
     guardrail_engine: GuardrailEngine,
     hitl_queue: HitlQueue | None,
     event_store: EventStore | None,
+    dlq_queue: DlqQueue | None,
 ) -> CampaignRunResult:
     """单次 Orchestrator → Audience → Creative → Guardrail 闭环。
 
@@ -254,6 +317,7 @@ async def _run_campaign_once(
         cost_guard=cost_guard,
         decisions=decisions,
         event_store=event_store,
+        dlq_queue=dlq_queue,
         correlation_id=correlation_id,
         campaign_id=None,
     )
@@ -271,6 +335,7 @@ async def _run_campaign_once(
             cost_guard=cost_guard,
             decisions=decisions,
             event_store=event_store,
+            dlq_queue=dlq_queue,
             correlation_id=correlation_id,
             campaign_id=plan.campaign_id,
         )
@@ -288,6 +353,7 @@ async def _run_campaign_once(
             cost_guard=cost_guard,
             decisions=decisions,
             event_store=event_store,
+            dlq_queue=dlq_queue,
             correlation_id=correlation_id,
             campaign_id=plan.campaign_id,
         )
@@ -376,6 +442,7 @@ async def run_campaign(
     guardrail_engine: GuardrailEngine | None = None,
     hitl_queue: HitlQueue | None = None,
     event_store: EventStore | None = None,
+    dlq_queue: DlqQueue | None = None,
     max_cost_replans: int = 1,
 ) -> CampaignRunResult:
     """按 brief 跑完 Orchestrator → Audience → Creative → Guardrail 四步。
@@ -400,8 +467,13 @@ async def run_campaign(
 
     **事件(P1-020/021):** 如传入 `event_store`,coordinator 会在 cost_guard /
     guardrail / creative.rejected / hitl.enqueued / cost_replan.triggered /
-    campaign.completed 六个位点 append 事件。不传则全链路静默运行,单测 CLI 默认
-    不开,生产 CLI 与 P2 worker 必须开。
+    campaign.completed / dlq.enqueued 七个位点 append 事件。不传则全链路静默运行,
+    单测 CLI 默认不开,生产 CLI 与 P2 worker 必须开。
+
+    **DLQ(P1-032):** 如传入 `dlq_queue`,Runner 抛 `ModelBehaviorError`(schema
+    反序列化失败)时 coordinator 会把失败信息入队并抛 `SchemaDeserializationFailed`,
+    不触发重规划(schema 不一致不是 brief 长度问题,重跑只会复现同一错)。不传则
+    直接抛,等价于原 P1-001 行为。
     """
     if max_cost_replans < 0:
         raise ValueError(f"max_cost_replans 必须 >= 0,收到 {max_cost_replans}")
@@ -424,6 +496,7 @@ async def run_campaign(
                 guardrail_engine=engine,
                 hitl_queue=hitl_queue,
                 event_store=event_store,
+                dlq_queue=dlq_queue,
             )
         except CostGuardDenied as denial:
             # Orchestrator 自身被拒 = brief 太长,没法再压缩;重试只会卡在同一步。

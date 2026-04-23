@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-# 目前只有 7 个 event_type,全部由 coordinator / guardrail / hitl 发射。
+# 目前 8 个 event_type,全部由 coordinator / guardrail / hitl / dlq 发射。
 # 新增类型必须:
 # 1. 在这里添加 Literal
 # 2. 在相应 emit 处写 payload 约定(哪些 key 必填、值的类型)
@@ -39,6 +39,9 @@ EventType = Literal[
     # campaign.completed: 一次 run_campaign 成功终止。payload 含 campaign_id /
     # segment_id / variant_id / approval_decision。
     "campaign.completed",
+    # dlq.enqueued: 不可恢复失败入 DLQ(P1-032 schema 反序列化失败等)。payload 含
+    # dlq_item_id / reason / source / error_message。
+    "dlq.enqueued",
 ]
 
 

@@ -12,15 +12,18 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from agents.exceptions import ModelBehaviorError
 
 from auto_marketing_agent.agents import coordinator as coordinator_mod
 from auto_marketing_agent.agents.coordinator import (
     CampaignAgents,
     CreativeRejected,
+    SchemaDeserializationFailed,
     _check_consistency,
     run_campaign,
 )
 from auto_marketing_agent.cost_guard import CostGuard, CostGuardConfig, CostGuardDenied
+from auto_marketing_agent.dlq import InMemoryDlq
 from auto_marketing_agent.events import InMemoryEventStore
 from auto_marketing_agent.hitl import InMemoryHitlQueue
 from auto_marketing_agent.schemas.common import KPITarget, Money
@@ -741,3 +744,148 @@ async def test_run_campaign_without_event_store_still_succeeds(
         agents=_build_default_agents(),
     )
     assert result.approval.decision == "approve"
+
+
+# ---------------------------------------------------------------------------
+# P1-032 Schema 反序列化失败 → DLQ
+# ---------------------------------------------------------------------------
+
+
+def _install_model_behavior_error(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_on_agent: str,
+    message: str = "Invalid JSON: missing field `campaign_id`",
+) -> list[Any]:
+    """让指定 agent 的 Runner.run 抛 ModelBehaviorError,其余按顺序出 stub 结果。
+
+    早于失败 agent 的调用仍要返回真实 payload,因为 coordinator 需要 plan.campaign_id
+    来拼 audience/creative 的 prompt。
+    """
+    queue: list[Any] = [_plan(), _segment(), _variant()]
+    calls: list[Any] = []
+
+    async def fake_run(agent: Any, input_: Any, **kwargs: Any) -> _StubRunResult:
+        calls.append((agent.name, input_))
+        if agent.name == fail_on_agent:
+            raise ModelBehaviorError(message)
+        return _StubRunResult(queue.pop(0))
+
+    monkeypatch.setattr("auto_marketing_agent.agents.coordinator.Runner.run", fake_run)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_schema_deserialization_failure_pushes_to_dlq(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_model_behavior_error(monkeypatch, fail_on_agent="creative-agent")
+    dlq = InMemoryDlq()
+
+    with pytest.raises(SchemaDeserializationFailed) as exc:
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            dlq_queue=dlq,
+        )
+
+    assert exc.value.agent_name == "creative-agent"
+    assert exc.value.dlq_item is not None
+    pending = dlq.list_pending()
+    assert len(pending) == 1
+    item = pending[0]
+    assert item.reason == "schema_deserialization_failed"
+    assert item.source == "creative-agent"
+    assert item.correlation_id == CORRELATION
+    assert item.campaign_id == CAMPAIGN_ID  # creative 阶段已拿到 plan.campaign_id
+    assert "missing field" in item.error_message
+
+
+@pytest.mark.asyncio
+async def test_schema_deserialization_failure_on_orchestrator_has_no_campaign_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Orchestrator 输出反序列化失败时,campaign_id 还没产出,DLQ 记录允许为 None。"""
+    _install_model_behavior_error(monkeypatch, fail_on_agent="orchestrator-agent")
+    dlq = InMemoryDlq()
+
+    with pytest.raises(SchemaDeserializationFailed):
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            dlq_queue=dlq,
+        )
+    [item] = dlq.list_pending()
+    assert item.source == "orchestrator-agent"
+    assert item.campaign_id is None
+
+
+@pytest.mark.asyncio
+async def test_schema_deserialization_failure_emits_dlq_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_model_behavior_error(monkeypatch, fail_on_agent="audience-agent")
+    dlq = InMemoryDlq()
+    store = InMemoryEventStore()
+
+    with pytest.raises(SchemaDeserializationFailed):
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            event_store=store,
+            dlq_queue=dlq,
+        )
+
+    types = [e.event_type for e in store.list_all()]
+    assert types == [
+        "cost_guard.authorized",  # orchestrator 放行
+        "cost_guard.authorized",  # audience 放行(在抛异常之前)
+        "dlq.enqueued",
+    ]
+    dlq_event = store.list_all()[-1]
+    [item] = dlq.list_pending()
+    assert dlq_event.payload["dlq_item_id"] == item.item_id
+    assert dlq_event.payload["reason"] == "schema_deserialization_failed"
+    assert dlq_event.payload["source"] == "audience-agent"
+    assert dlq_event.campaign_id == CAMPAIGN_ID
+
+
+@pytest.mark.asyncio
+async def test_schema_deserialization_failure_does_not_trigger_replan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """schema 错不是 brief 长度问题,不能走 Cost Guard 重规划路径。"""
+    calls = _install_model_behavior_error(monkeypatch, fail_on_agent="audience-agent")
+    dlq = InMemoryDlq()
+
+    with pytest.raises(SchemaDeserializationFailed):
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+            dlq_queue=dlq,
+            max_cost_replans=3,
+        )
+
+    # 只跑了 orch + audience 就爆,没有重跑 Orchestrator
+    agent_names = [name for name, _ in calls]
+    assert agent_names == ["orchestrator-agent", "audience-agent"]
+
+
+@pytest.mark.asyncio
+async def test_schema_deserialization_failure_without_dlq_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """不传 dlq_queue 时保持原行为:直接抛 SchemaDeserializationFailed,dlq_item=None。"""
+    _install_model_behavior_error(monkeypatch, fail_on_agent="creative-agent")
+
+    with pytest.raises(SchemaDeserializationFailed) as exc:
+        await run_campaign(
+            brief="x",
+            correlation_id=CORRELATION,
+            agents=_build_default_agents(),
+        )
+    assert exc.value.dlq_item is None

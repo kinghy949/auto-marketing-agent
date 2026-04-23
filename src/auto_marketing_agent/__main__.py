@@ -28,6 +28,7 @@ from auto_marketing_agent.agents.coordinator import (
     run_campaign,
 )
 from auto_marketing_agent.agents.hello import run_hello
+from auto_marketing_agent.dlq import InMemoryDlq
 from auto_marketing_agent.events import (
     Event,
     EventStore,
@@ -204,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         correlation_id = args.correlation_id or f"corr:{uuid.uuid4()}"
         agents = build_default_agents(model=model)
         hitl_queue = InMemoryHitlQueue()
+        dlq_queue = InMemoryDlq()
         # 有 --events-file 就落盘 JSONL,便于 `events replay` 消费;否则只在
         # 内存里累积,进程退出即丢。
         event_store: EventStore
@@ -218,11 +220,13 @@ def main(argv: list[str] | None = None) -> int:
                 agents=agents,
                 hitl_queue=hitl_queue,
                 event_store=event_store,
+                dlq_queue=dlq_queue,
             )
         )
         output = _dump_result(result)
         output_obj = json.loads(output)
         output_obj["event_count"] = len(event_store)
+        output_obj["dlq_pending_count"] = len(dlq_queue.list_pending())
         print(json.dumps(output_obj, ensure_ascii=False, indent=2))
         return 0
 

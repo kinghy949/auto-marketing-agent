@@ -111,8 +111,8 @@
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
 | P1-030 | 通用重试装饰器(指数退避,最多 3 次) | ✅ | P0-001 | `auto_marketing_agent.retry.retry`,同步 / 异步均支持,`retry_on` 必传 |
-| P1-031 | DLQ Protocol + InMemoryDlq | ⬜ | P1-020 | Postgres 后端见 P1-035 |
-| P1-032 | Schema 反序列化失败 → DLQ + 告警 | ⬜ | P0-017, P1-031 | |
+| P1-031 | DLQ Protocol + InMemoryDlq | ✅ | P1-020 | `auto_marketing_agent.dlq`;Postgres 后端见 P1-035 |
+| P1-032 | Schema 反序列化失败 → DLQ + 告警 | ✅ | P0-017, P1-031 | coordinator 拦 `ModelBehaviorError`,抛 `SchemaDeserializationFailed` 并发 `dlq.enqueued` 事件;告警接入推到 P3 Observability |
 | P1-033 | Sandbox 崩溃 → 自动重启 + 单次重试 | ⬜ | P1-030, P2-040 | 依赖 sandbox runtime 存在 |
 | P1-034 | HITL 队列 Postgres 后端 | ⬜ | P1-053 | Iter 3 部署阻塞项 |
 | P1-035 | DLQ Postgres 后端 | ⬜ | P1-031 | Iter 3 部署阻塞项 |
@@ -267,10 +267,10 @@
 |------|---------|--------|
 | 跨阶段 | 8 | 8 |
 | P0 | 22 | 21 |
-| P1 | 21 | 10 |
+| P1 | 21 | 12 |
 | P2 | 21 | 0 |
 | P3 | 18 | 0 |
-| **合计** | **90** | **39** |
+| **合计** | **90** | **41** |
 
 > 完成数随 commit 同步更新。
 

@@ -127,13 +127,22 @@ def test_run_subcommand_prints_three_payloads_as_json(
     assert exit_code == 0
     out = capsys.readouterr().out
     payload = json.loads(out)
-    # event_count 出现在 run 子命令输出,因为 CLI 默认传入 InMemoryEventStore。
-    # stub 的 run_campaign 不实际 append,所以是 0,但 key 必须在。
-    assert set(payload.keys()) == {"plan", "segment", "variant", "approval", "event_count"}
+    # event_count / dlq_pending_count 出现在 run 子命令输出,因为 CLI 默认传入
+    # InMemoryEventStore + InMemoryDlq。stub 的 run_campaign 不实际写入,所以是 0,
+    # 但 key 必须在。
+    assert set(payload.keys()) == {
+        "plan",
+        "segment",
+        "variant",
+        "approval",
+        "event_count",
+        "dlq_pending_count",
+    }
     assert payload["plan"]["campaign_id"] == "cmp:cli:202604"
     assert payload["variant"]["target_segment_id"] == payload["segment"]["segment_id"]
     assert payload["approval"]["decision"] == "approve"
     assert payload["event_count"] == 0
+    assert payload["dlq_pending_count"] == 0
 
 
 def test_run_subcommand_generates_correlation_id_when_missing(

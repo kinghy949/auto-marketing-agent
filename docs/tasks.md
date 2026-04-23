@@ -115,7 +115,7 @@
 | P1-032 | Schema 反序列化失败 → DLQ + 告警 | ✅ | P0-017, P1-031 | coordinator 拦 `ModelBehaviorError`,抛 `SchemaDeserializationFailed` 并发 `dlq.enqueued` 事件;告警接入推到 P3 Observability |
 | P1-033 | Sandbox 崩溃 → 自动重启 + 单次重试 | ⬜ | P1-030, P2-040 | 依赖 sandbox runtime 存在 |
 | P1-034 | HITL 队列 Postgres 后端 | ⬜ | P1-053 | Iter 3 部署阻塞项 |
-| P1-035 | DLQ Postgres 后端 | ⬜ | P1-031 | Iter 3 部署阻塞项 |
+| P1-035 | DLQ Postgres 后端 | ✅ | P1-031 | `dlq/postgres_queue.py` + `migrations/002_dlq_items.sql`(CHECK 约束守状态机一致性 + partial index on pending);resolve 并发走行锁 + WHERE 条件 + 二次 SELECT 区分 NotFound / AlreadyResolved |
 
 ### Media Buyer Agent(单平台先)
 
@@ -267,10 +267,10 @@
 |------|---------|--------|
 | 跨阶段 | 8 | 8 |
 | P0 | 22 | 21 |
-| P1 | 21 | 17 |
+| P1 | 21 | 18 |
 | P2 | 21 | 0 |
 | P3 | 18 | 0 |
-| **合计** | **90** | **46** |
+| **合计** | **90** | **47** |
 
 > 完成数随 commit 同步更新。
 
@@ -296,7 +296,7 @@
 
 解锁:装得出去给客户试跑。
 
-- P1-024 ✅、P1-034、P1-035、P1-003 ✅、P1-061、P1-062
+- P1-024 ✅、P1-034、P1-035 ✅、P1-003 ✅、P1-061、P1-062
 
 ### Iter 4 —— 自治基础设施(3–4 周)
 

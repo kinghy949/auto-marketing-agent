@@ -101,9 +101,9 @@
 | ID | 任务 | 状态 | 依赖 | 备注 |
 |----|------|------|------|------|
 | P1-020 | PostgreSQL append-only event 表设计 | ✅ | X-005 | `migrations/001_events.sql` + ADR-0002,单表 + JSONB + append-only 触发器 |
-| P1-021 | Event 写入 SDK(每个 agent decision 一条) | ✅ | P1-020 | `events/` 包,Protocol + InMemoryEventStore;coordinator 在 7 个位点发射事件 |
-| P1-022 | 按 `campaign_id` 重放工具 | ⬜ | P1-021 | CLI 命令 |
-| P1-023 | Event 查询 API(供调试 / 离线 eval 使用) | ⬜ | P1-021 | |
+| P1-021 | Event 写入 SDK(每个 agent decision 一条) | ✅ | P1-020 | `events/` 包,Protocol + InMemoryEventStore;coordinator 在 8 个位点发射事件(含 `dlq.enqueued`) |
+| P1-022 | 按 `campaign_id` 重放工具 | ✅ | P1-021 | `JsonlEventStore` + `auto-marketing-agent events replay`(commit `dab85c1`) |
+| P1-023 | Event 查询 API(供调试 / 离线 eval 使用) | ✅ | P1-021 | `EventStore.list_by_time_range` / `list_by_correlation` / `list_by_campaign`,CLI replay 支持 `--event-type` / `--since` / `--until` 过滤 |
 | P1-024 | Event Store Postgres 后端(替换 InMemory 生产路径) | ⬜ | P1-020, P1-021 | Iter 3 部署阻塞项 |
 
 ### 错误处理 / 重试 / DLQ
@@ -267,10 +267,10 @@
 |------|---------|--------|
 | 跨阶段 | 8 | 8 |
 | P0 | 22 | 21 |
-| P1 | 21 | 13 |
+| P1 | 21 | 15 |
 | P2 | 21 | 0 |
 | P3 | 18 | 0 |
-| **合计** | **90** | **42** |
+| **合计** | **90** | **44** |
 
 > 完成数随 commit 同步更新。
 
@@ -280,11 +280,11 @@
 
 按"解锁下一档可用性"分档,每档独立可收尾。依赖外部账号的留在 Iter 2;Iter 1 / 3 / 4 / 5 可全离线推进。
 
-### Iter 1 —— Event Store 闭环 + 错误韧性(1–1.5 周)
+### Iter 1 —— Event Store 闭环 + 错误韧性(1–1.5 周)✅
 
 解锁:审计可重放、异常不静默丢。
 
-- P1-022、P1-023、P1-031、P1-032、P1-002
+- P1-022 ✅、P1-023 ✅、P1-031 ✅、P1-032 ✅、P1-002 ✅
 
 ### Iter 2 —— 真实投放链路(2–3 周,挡 Meta 开发者账号)
 
